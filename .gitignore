@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Spread SDK
+spread-*.whl
+spread-typescript.tar.gz
+
+# Reveal data (large, regenerable)
+reveal-*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node / Bun (if using TypeScript kit)
+node_modules/
+bun.lockb
+
+# Logs & temp
+*.log
+tmp/
