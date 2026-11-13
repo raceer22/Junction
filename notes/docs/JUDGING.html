@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en" data-bx-palette="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spread: how you win</title>
+    <meta name="description" content="The ranking rounds, the final, the jury, what to submit and how to present your system." />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#12110e" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Spread: how you win" />
+    <meta property="og:description" content="The ranking rounds, the final, the jury, what to submit and how to present your system." />
+    <meta property="og:image" content="https://spread.bahnexpress.com/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="/icon-2nt2tvdj.svg" type="image/svg+xml" />
+    
+    
+  <link rel="stylesheet" crossorigin href="/chunk-dz9b1se3.css"><script type="module" crossorigin src="/chunk-0m38m00e.js"></script></head>
+  <body>
+    <header class="site-header"></header>
+    <main class="frame doc" id="content">
+      <div class="doc-head">
+        <h1>How you win</h1>
+        <p class="lead">The ranking rounds show where you stand. The final picks the 10 ranked teams with the highest margin. The jury chooses the winners from these 10.</p>
+      </div>
+      <div class="doc-grid">
+        <nav class="toc" aria-label="On this page">
+          <a href="#weekend">The weekend</a>
+          <a href="#rounds">Ranking rounds</a>
+          <a href="#final">The final</a>
+          <a href="#jury">What the jury looks for</a>
+          <a href="#submit">What to submit</a>
+          <a href="#presentation">Your presentation</a>
+          <a href="#clarity">Say it clearly</a>
+          <a href="#help">Help and hints</a>
+        </nav>
+        <div class="doc-body">
+          <section id="weekend">
+            <h2>The weekend</h2>
+            <p class="key">Junction 2026, from Friday 13 to Sunday 15 November. All times are Helsinki time.</p>
+            <p>Junction can still change its own times. If this page and <a href="https://2026.hackjunction.com/#schedule">Junction’s schedule</a> differ on them, Junction’s schedule is right.</p>
+            <dl class="terms">
+              <div><dt>Friday 18:00</dt><dd>The opening ceremony, with the challenge videos.</dd></div>
+              <div><dt>Friday 19:30</dt><dd>Hacking starts, and the first ranking round opens. Create your team and run the starter.</dd></div>
+              <div><dt>Friday 23:59</dt><dd>The preliminary submission on the Junction platform.</dd></div>
+              <div><dt>Saturday</dt><dd>Ranking rounds open at 00:00, 09:00, 12:00, 15:00, 18:00 and 21:00. Test finals at 14:00 and 20:00 let you try the live clock. Submissions open on the Junction platform at 12:00.</dd></div>
+              <div><dt>Sunday 00:00</dt><dd>The last three ranking rounds open at 00:00, 03:00 and 06:00.</dd></div>
+              <div><dt>Sunday 08:00</dt><dd>The final. We set it at 07:30, and registration closes then.</dd></div>
+              <div><dt>Sunday 10:00</dt><dd>Final submissions close on the Junction platform.</dd></div>
+              <div><dt>Sunday 10:30</dt><dd>Junction’s review time, until 14:00. Our jury meets the 10 teams then.</dd></div>
+              <div><dt>Sunday 14:00</dt><dd>The final ceremony. Junction names the challenge winners at 15:10.</dd></div>
+            </dl>
+          </section>
+
+          <section id="rounds">
+            <h2>Ranking rounds</h2>
+            <p class="key">Every team plays the same five secret weeks at each level, so the leaderboard compares systems on equal terms.</p>
+            <ul class="facts">
+              <li>The first round opens on Friday at 19:30, when hacking starts. On Saturday, rounds open at 00:00, 09:00, 12:00, 15:00, 18:00 and 21:00. The last rounds open on Sunday at 00:00, 03:00 and 06:00.</li>
+              <li>A team is ranked in a round when it has played all five weeks, each with at least 90% of its orders on time. Its margin is the sum of the five weeks.</li>
+              <li>Each round has new weeks. Between rounds, test your changes on your own practice weeks, then play the next round.</li>
+              <li>Two house teams play every round. House starter is the starter in your kit. House best is the best system we built. Thus you can see how far you are from both.</li>
+              <li>The rounds do not count for the final. They show you where you stand.</li>
+            </ul>
+          </section>
+
+          <section id="final">
+            <h2>The final</h2>
+            <p class="key">One secret week at level 8, the hardest level. Every team plays its own copy of it, so teams never compete for the same car or driver.</p>
+            <ul class="facts">
+              <li>The final starts on Sunday at 08:00. The week runs by itself, takes about 34 minutes and ends at about 08:35. <a href="/how#final">How the final runs</a> explains the technical side.</li>
+              <li>Start your system at any time before 08:00. The kits’ starters, started with <code>--final</code>, wait for the final when none is set. Your system must run until the end.</li>
+              <li>If your system stops, start it again at once. It rejoins the same week. While it is down, requests go to the competitor, and the drivers keep driving.</li>
+              <li>Run it on a machine with a steady connection. A cloud machine near Stockholm, where our server is, is a good choice.</li>
+              <li>Your result is your gross margin in euros. A team with fewer than 90% of its orders on time is not ranked. A team that wins no order is not ranked. Teams with the same margin to the cent share a rank.</li>
+              <li>The 10 ranked teams with the highest margin present to the jury. If fewer than 10 teams are ranked, only the ranked teams present.</li>
+              <li>We set the final at 07:30, and registration closes then. A team created after that cannot play it. Registration also pauses for each test final on Saturday, from 13:45 and from 19:45, until that test final ends.</li>
+              <li>The leaderboard shows the final live. After it ends, we replay every team’s week to check each score.</li>
+            </ul>
+          </section>
+
+          <section id="jury">
+            <h2>What the jury looks for</h2>
+            <p class="key">Reaching the top 10 is enough. After that, the jury judges how you built your system, and your margin no longer counts.</p>
+            <dl class="terms wide">
+              <div><dt>Elegant</dt><dd>A simple idea that does a lot of the work. Few parts, each with a reason that you can state.</dd></div>
+              <div><dt>Clear</dt><dd>We can follow how your system decides, from your presentation and from your code. You can explain each of your big ideas and why you had it.</dd></div>
+              <div><dt>Creative</dt><dd>An idea that we did not expect: a new way to see the dealers, the drivers or the week.</dd></div>
+              <div><dt>Robust</dt><dd>It does well on weeks it has never seen, and you show this with results over many weeks. It survives a restart, a slow network and a surprise.</dd></div>
+            </dl>
+          </section>
+
+          <section id="submit">
+            <h2>What to submit</h2>
+            <p class="key">Submit on the Junction platform by Sunday 10:00. Junction also asks for a preliminary submission by Friday 23:59. Every team submits. The jury reads the submissions of the top 10.</p>
+            <ol class="steps">
+              <li><b>Your submission hash.</b> It is on your team page. It shows that the submission is yours, so we can match it to your result.</li>
+              <li><b>A link to your code.</b></li>
+              <li><b>Your presentation.</b> Slides or a short video. Aim for 5 to 10 slides.</li>
+            </ol>
+          </section>
+
+          <section id="presentation">
+            <h2>Your presentation</h2>
+            <p class="key">Show us the big ideas in your system, and measure the effect of each one. Aim for 5 to 10 slides, or a short video.</p>
+            <p>A system is a set of ideas. Choose the ideas that do the most, and use the structure that explains them best. For each big idea, tell us three things:</p>
+            <dl class="terms">
+              <div><dt>The idea</dt><dd>What your system does, and in which cases.</dd></div>
+              <div><dt>Why</dt><dd>What you saw in the world or in your results that made you try it.</dd></div>
+              <div><dt>The effect</dt><dd>Your margin and on-time share with the idea and without it, on the same weeks.</dd></div>
+            </dl>
+            <p>Good topics are prices and drivers: which cars you win and at what price, how you set fees, and when you combine cars.</p>
+            <p>Also tell us your result in the final and in your best ranking round, what did not work, and what would break your system.</p>
+          </section>
+
+          <section id="clarity">
+            <h2>Say it clearly</h2>
+            <p class="key">Clarity counts. A clear explanation of a few good ideas beats a long tour of a big system.</p>
+            <ul class="facts">
+              <li>Start with the answer: your result and your big ideas.</li>
+              <li>Put one idea on a slide: a claim, and the evidence for it.</li>
+              <li>Give each number its unit and a comparison. For example: “€12,551 a week, against −€67,177 for the starter, on the same 20 weeks at level 8”.</li>
+              <li>Show how your system decides. A rule, a formula or a diagram tells us more than a screenshot of code.</li>
+              <li>Use the challenge’s words: dealer, request, gig, fee, typical fee, deadline. Do not invent new names for them.</li>
+              <li>Cut what does not help us judge. No filler, no slogans, no long lists.</li>
+              <li>Say what did not work and what you do not know. A team that shows its limits is easier to trust.</li>
+              <li>If an agent wrote your slides, read every line and cut each one that you cannot explain yourself.</li>
+            </ul>
+          </section>
+
+          <section id="help">
+            <h2>Help and hints</h2>
+            <p class="key">The Bahn team is at our booth during the event.</p>
+            <p>Ask us about the rules, the world, or how dispatch works in real life. If your team is stuck, ask for a hint. We give one step at a time.</p>
+          </section>
+        </div>
+      </div>
+    </main>
+    <footer class="site-footer"></footer>
+    
+  </body>
+</html>
