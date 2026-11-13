@@ -5,7 +5,7 @@
 
 ## Work split
 - **raceer:** [current focus]
-- **Veolzu:** [current focus]
+- **Veolzu:** testing workflow
 
 ## Git basics
 - **Commits:** [e.g. `[feat|fix|chore]: short description`]
