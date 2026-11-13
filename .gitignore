@@ -38,3 +38,5 @@ bun.lockb
 # Logs & temp
 *.log
 tmp/
+
+AGENTS.md
