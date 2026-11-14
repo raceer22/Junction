@@ -1,0 +1,230 @@
+/* Custom Styling for Finland Fleet Dispatcher Simulation */
+
+:root {
+  --color-surface: #0a1327;
+  --color-surface-low: #121b2f;
+  --color-surface-container: #161f33;
+  --color-surface-high: #212a3e;
+  --color-surface-highest: #2c344a;
+  --color-primary: #00d2ff;
+  --color-primary-dim: #47d6ff;
+  --color-secondary: #4edea3;
+  --color-tertiary: #ffb148;
+  --color-error: #ff5252;
+  --color-text-main: #d9e2fe;
+  --color-text-muted: #859399;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background-color: var(--color-surface);
+  color: var(--color-text-main);
+  overflow-x: hidden;
+}
+
+.font-mono {
+  font-family: 'JetBrains Mono', monospace, Consolas, Courier;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-surface-low);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-surface-highest);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-primary-dim);
+}
+
+/* Glow effects */
+.glow-primary {
+  box-shadow: 0 0 15px rgba(0, 210, 255, 0.4);
+}
+.glow-secondary {
+  box-shadow: 0 0 15px rgba(78, 222, 163, 0.4);
+}
+.glow-tertiary {
+  box-shadow: 0 0 15px rgba(255, 177, 72, 0.4);
+}
+.text-glow-primary {
+  text-shadow: 0 0 10px rgba(0, 210, 255, 0.6);
+}
+
+/* Range input styling */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  background: #1c2b46;
+  height: 8px;
+  border-radius: 4px;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -5px;
+  background-color: #00d2ff;
+  height: 18px;
+  width: 18px;
+  border-radius: 50%;
+  box-shadow: 0 0 12px #00d2ff, 0 0 4px #fff;
+  border: 2px solid #0a1327;
+  cursor: grab;
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+  box-shadow: 0 0 18px #00d2ff, 0 0 8px #fff;
+}
+
+input[type="range"]::-webkit-slider-thumb:active {
+  cursor: grabbing;
+  transform: scale(1.3);
+}
+
+/* Leaflet Map overrides for Cyber/Dark Theme */
+.leaflet-container {
+  background: #0a1327 !important;
+  font-family: inherit;
+}
+
+.leaflet-control-zoom a {
+  background-color: #161f33 !important;
+  color: #00d2ff !important;
+  border-color: #212a3e !important;
+}
+
+.leaflet-control-zoom a:hover {
+  background-color: #212a3e !important;
+  color: #fff !important;
+}
+
+.leaflet-popup-content-wrapper {
+  background-color: #121b2f !important;
+  color: #d9e2fe !important;
+  border: 1px solid #00d2ff44;
+  border-radius: 8px !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6) !important;
+}
+
+.leaflet-popup-tip {
+  background-color: #121b2f !important;
+}
+
+/* Vehicle Pulse Markers */
+.vehicle-marker-pulse {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.vehicle-marker-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #00d2ff;
+  color: #050e21;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 10px #00d2ff;
+  font-size: 13px;
+  font-weight: bold;
+  border: 2px solid #fff;
+  transition: transform 0.2s ease;
+}
+
+.vehicle-marker-icon.electric {
+  background: #4edea3;
+  box-shadow: 0 0 12px #4edea3;
+}
+
+.vehicle-marker-icon.driver {
+  background: #ffb148;
+  box-shadow: 0 0 12px #ffb148;
+}
+
+.pulse-ring {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid #00d2ff;
+  animation: pulse-animation 2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+  pointer-events: none;
+}
+
+@keyframes pulse-animation {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+}
+
+/* City Hub Node Markers */
+.city-hub-marker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.city-hub-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #859399;
+  border: 2px solid #161f33;
+  box-shadow: 0 0 6px rgba(133, 147, 153, 0.6);
+}
+
+.city-hub-dot.major {
+  width: 14px;
+  height: 14px;
+  background: #00d2ff;
+  box-shadow: 0 0 10px #00d2ff;
+}
+
+.city-hub-label {
+  font-size: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  color: #a5e7ff;
+  text-shadow: 0 1px 3px #000, 0 0 8px #000;
+  white-space: nowrap;
+  margin-top: 2px;
+  letter-spacing: 0.05em;
+}
+
+/* Drag and Drop Zone */
+.dropzone-active {
+  border-color: #00d2ff !important;
+  background-color: rgba(0, 210, 255, 0.08) !important;
+}
+
+/* Rotary Clock SVG */
+#analogClockContainer {
+  transition: transform 0.2s ease;
+}
+#analogClockContainer:hover {
+  transform: scale(1.03);
+}
