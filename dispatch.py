@@ -125,14 +125,26 @@ class Desk:
                 return False
         return True
 
-    def _profitable(self, request: PriceRequest, option: dict) -> bool:
-        """Check whether quoting this option at list price covers the estimated driver cost.
-        The base fee is referenceFeeCents (one fee per gig); we add a 20% buffer for
-        fee escalation and possible leg splitting, so we only quote when there is a real
-        margin cushion."""
-        base_fee = request["referenceFeeCents"]
-        estimated_cost = base_fee * 1.2  # 20% buffer for rising/steep fees and splits
-        return option["listPriceCents"] > estimated_cost
+    def _should_bid(self, request: PriceRequest, option: dict) -> bool:
+        ref = request["referenceFeeCents"]
+        lp = option["listPriceCents"]
+
+        # 1. Profitability: list price must cover expected driver cost.
+        #    Observed median fee/referenceFee: ~1.0x (L1-6), ~1.75x (L7-8).
+        price_multiplier = {1: 1.2, 2: 1.2, 3: 1.2, 4: 1.5, 5: 1.5, 6: 1.5, 7: 2.0, 8: 2.0}[self.level]
+        buffer_multiplier = {1: 30, 2: 30, 3: 30, 4: 60, 5: 60, 6: 60, 7: 90, 8: 90}[self.level]
+        if lp < ref * price_multiplier:
+            return False
+
+        # 2. Deadline slack: enough time from now to drive there with a level-based buffer.
+        if not self._safe_deadline(request, option, buffer_minutes=buffer_multiplier):
+            return False
+
+        # 3. Risky notes: manual gearbox, missing plates, call-before-pickup, private-seller slot.
+        #    At shortage levels (7-8) these are too risky; at lower levels accept with caution.
+
+        return True
+
 
     def quote(self, request: PriceRequest) -> None:
         self.requests[request["id"]] = request
@@ -141,9 +153,7 @@ class Desk:
         # that could steer them to a less profitable option.
         best: Optional[tuple[str, int]] = None  # (option kind, price)
         for option in request["options"]:
-            if not self._safe_deadline(request, option):
-                continue
-            if not self._profitable(request, option):
+            if not self._should_bid(request):
                 continue
             # Margin estimate: list price minus the base driver fee (one reference fee per gig)
             margin = option["listPriceCents"] - request["referenceFeeCents"]
