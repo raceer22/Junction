@@ -22,7 +22,7 @@ HOUR, DAY = 60, 24 * 60
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 # The events that need an answer. Views and account lines arrive with the next event that needs an answer.
 WAKE_ON: list[DeskEventKind] = ["price_request", "order_won", "order_changed", "order_cancelled", "visit_failed", "gig_expired", "deadline_close"]
-
+LARGE_QUOTE= 1000000000000000
 
 class Retry(NamedTuple):
     """How to post a leg again after a failed visit."""
@@ -127,12 +127,11 @@ class Desk:
 
     def _profitable(self, request: PriceRequest, option: dict) -> bool:
         """Check whether quoting this option at list price covers the estimated driver cost.
-        The base fee is referenceFeeCents (one car per gig); we add a 30% buffer for
+        The base fee is referenceFeeCents (one fee per gig); we add a 20% buffer for
         fee escalation and possible leg splitting, so we only quote when there is a real
         margin cushion."""
-        legs = max(1, len(request["legs"]))
-        base_fee = request["referenceFeeCents"]  # one fee per gig, roughly independent of leg count
-        estimated_cost = base_fee * 1.3  # 30% buffer for rising/steep fees and splits
+        base_fee = request["referenceFeeCents"]
+        estimated_cost = base_fee * 1.2  # 20% buffer for rising/steep fees and splits
         return option["listPriceCents"] > estimated_cost
 
     def quote(self, request: PriceRequest) -> None:
@@ -152,7 +151,8 @@ class Desk:
                 best = (option["kind"], option["listPriceCents"])
         if best is None:
             # No safe and profitable option: better to lose the order than to lose money on it.
-            return
+            best = (option["kind"], LARGE_QUOTE)
+            
         self.outbox.append({"type": "quote", "requestId": request["id"], "prices": {best[0]: best[1]}})
 
     def win(self, order: Order) -> None:
