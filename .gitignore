@@ -42,6 +42,4 @@ tmp/
 
 AGENTS.md
 opencode.js
-practice*/
-.agents/
-.scractch/
+./agents
