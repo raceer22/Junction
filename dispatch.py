@@ -31,6 +31,8 @@ from spread.types import (
 
 HOUR, DAY = 60, 24 * 60
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+# The events that need an answer. Views and account lines arrive with the next event that needs an answer.
+WAKE_ON: list[DeskEventKind] = ["price_request", "order_won", "order_lost", "order_changed", "order_cancelled", "visit_failed", "gig_expired", "deadline_close"]
 
 # Part B: react before the server's deadline_close (3 h before lastPickupAt). Once
 # the last pickup is within this many minutes, treat the order as urgent: steep
@@ -144,6 +146,9 @@ class Desk:
         elif kind == "order_lost":  # the dealer bought from the competitor
             self.lost(event.get("requestId", ""))
         elif kind == "order_changed":
+        elif event["kind"] == "order_lost":  # the dealer bought from the competitor
+            self.lost(event.get("requestId", ""))
+        elif event["kind"] == "order_changed":
             self.change(event["order"])
         elif kind == "order_cancelled":  # the world has stopped the car and told each of its gigs what happens
             for books in (self.orders, self.leg_gigs):
