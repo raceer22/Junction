@@ -143,9 +143,27 @@ input[type="range"]::-moz-range-thumb:active {
 }
 
 /* Leaflet Map overrides for Cyber/Dark Theme */
+#mapCanvasWrapper {
+  position: relative;
+  isolation: isolate;
+  z-index: 0;
+}
+
 .leaflet-container {
   background: #0a1327 !important;
   font-family: inherit;
+  position: relative;
+  isolation: isolate;
+  z-index: 0 !important;
+}
+
+#dropzoneModal,
+#customArgsModal {
+  z-index: 2000 !important;
+}
+
+#hudNotification {
+  z-index: 2100 !important;
 }
 
 .leaflet-control-zoom a {
@@ -275,4 +293,30 @@ input[type="range"]::-moz-range-thumb:active {
 }
 #analogClockContainer:hover {
   transform: scale(1.03);
+}
+
+/* Custom Dropdown Select Styling (Nordic Dark Theme) */
+.custom-select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-color: #161f33;
+  color: #d9e2fe;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2300d2ff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.65rem center;
+  background-size: 14px 14px;
+  padding-right: 2.25rem;
+  cursor: pointer;
+}
+
+.custom-select:focus {
+  outline: none;
+  border-color: rgba(0, 210, 255, 0.65);
+  box-shadow: 0 0 0 2px rgba(0, 210, 255, 0.18);
+}
+
+.custom-select option {
+  background-color: #121b2f;
+  color: #d9e2fe;
 }

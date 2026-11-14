@@ -1160,7 +1160,9 @@ async function processUploadedFiles(files) {
 function showNotification(msg) {
   const notif = document.getElementById('hudNotification');
   if (notif) {
-    notif.textContent = msg;
+    notif.innerHTML = `<span class="material-symbols-outlined text-[18px]">check_circle</span><span></span>`;
+    const textSpan = notif.querySelector('span:last-child');
+    if (textSpan) textSpan.textContent = msg;
     notif.classList.remove('opacity-0', 'pointer-events-none');
     setTimeout(() => {
       notif.classList.add('opacity-0', 'pointer-events-none');
@@ -1169,10 +1171,374 @@ function showNotification(msg) {
 }
 
 // ==========================================
-// 9. INITIALIZATION
+// 9. CUSTOM CONSTANTS FORM (custom_args.py)
+// ==========================================
+const DEFAULT_CUSTOM_ARGS = {
+  PRICE_MULTIPLIER: { '1': 1.2, '2': 1.2, '3': 1.2, '4': 1.5, '5': 1.5, '6': 1.5, '7': 2.0, '8': 1.7 },
+  SLACK_BUFFER: { '1': 30, '2': 30, '3': 30, '4': 60, '5': 60, '6': 60, '7': 90, '8': 120 },
+  MAX_QUOTE_MULTIPLIER: 1.50,
+  PRICE_WAR_MULTIPLIER: 1.15,
+  MAX_DEALER_TRUST_PCT: 25,
+  TARGET_ONTIME_SHARE: 0.90,
+  OPENING_FEE: { '1': 1.0, '2': 1.0, '3': 1.0, '4': 1.0, '5': 1.0, '6': 1.0, '7': 1.4, '8': 1.3 },
+  MAX_FEE_MULTIPLE: { '7': 2.0, '8': 2.2 },
+  DEFAULT_MAX_FEE_MULTIPLE: 2.50,
+  DEADLINE_EARLY_MINUTES: 420,
+  QUICK_BOOK_MINUTES: 60,
+  STEEP_OPENING_MULTIPLE: 1.50,
+  LOW_BATTERY_PERCENT: 30
+};
+
+const PER_LEVEL_CUSTOM_KEYS = ['PRICE_MULTIPLIER', 'SLACK_BUFFER', 'OPENING_FEE', 'MAX_FEE_MULTIPLE'];
+const INT_CUSTOM_KEYS = new Set(['SLACK_BUFFER', 'MAX_DEALER_TRUST_PCT', 'DEADLINE_EARLY_MINUTES', 'QUICK_BOOK_MINUTES', 'LOW_BATTERY_PERCENT']);
+const SELECT_CUSTOM_KEYS = new Set(['DEADLINE_EARLY_MINUTES', 'QUICK_BOOK_MINUTES', 'LOW_BATTERY_PERCENT']);
+
+function cloneCustomArgsDefaults() {
+  return JSON.parse(JSON.stringify(DEFAULT_CUSTOM_ARGS));
+}
+
+const customArgsState = {
+  selectedScope: '8', // '1'..'8' or 'all'
+  lastLevel: '8',
+  values: cloneCustomArgsDefaults(),
+  uniformValues: {
+    PRICE_MULTIPLIER: 1.70,
+    SLACK_BUFFER: 120,
+    OPENING_FEE: 1.30,
+    MAX_FEE_MULTIPLE: 2.20
+  }
+};
+
+function syncRangeSliderProgress(sliderEl) {
+  if (!sliderEl || sliderEl.type !== 'range') return;
+  const min = parseFloat(sliderEl.min || '0');
+  const max = parseFloat(sliderEl.max || '100');
+  const val = parseFloat(sliderEl.value || '0');
+  const pct = max > min ? Math.max(0, Math.min(100, ((val - min) / (max - min)) * 100)) : 0;
+  sliderEl.style.setProperty('--progress', `${pct}%`);
+}
+
+function syncSelectControlValue(selectEl, numericValue, unitFormatter) {
+  if (!selectEl) return;
+  const strVal = String(numericValue);
+  let exists = Array.from(selectEl.options).some(opt => opt.value === strVal);
+  if (!exists) {
+    const newOpt = document.createElement('option');
+    newOpt.value = strVal;
+    newOpt.textContent = unitFormatter ? unitFormatter(numericValue) : strVal;
+    const inserted = Array.from(selectEl.options).find(opt => Number(opt.value) > Number(numericValue));
+    if (inserted) {
+      selectEl.insertBefore(newOpt, inserted);
+    } else {
+      selectEl.appendChild(newOpt);
+    }
+  }
+  selectEl.value = strVal;
+}
+
+function getEffectivePerLevelValue(key, levelStr) {
+  const map = customArgsState.values[key] || {};
+  if (map[levelStr] !== undefined) return map[levelStr];
+  if (key === 'MAX_FEE_MULTIPLE') {
+    return customArgsState.values.DEFAULT_MAX_FEE_MULTIPLE;
+  }
+  return DEFAULT_CUSTOM_ARGS[key][levelStr];
+}
+
+function formatCustomReadout(key, val) {
+  const num = Number(val);
+  if (key === 'SLACK_BUFFER') return `${Math.round(num)} min`;
+  if (key === 'MAX_DEALER_TRUST_PCT') return `+${Math.round(num)}%`;
+  if (key === 'TARGET_ONTIME_SHARE') return `${Math.round(num * 100)}% (${num.toFixed(2)})`;
+  return `${num.toFixed(2)}x`;
+}
+
+function formatPerLevelSummary(key) {
+  if (customArgsState.selectedScope === 'all') {
+    const v = customArgsState.uniformValues[key];
+    return key === 'SLACK_BUFFER' ? `Uniform L1–8: ${Math.round(v)}m` : `Uniform L1–8: ${Number(v).toFixed(2)}x`;
+  }
+  const l1 = getEffectivePerLevelValue(key, '1');
+  const l4 = getEffectivePerLevelValue(key, '4');
+  const l7 = getEffectivePerLevelValue(key, '7');
+  const l8 = getEffectivePerLevelValue(key, '8');
+  if (key === 'SLACK_BUFFER') {
+    return `L1:${l1} L4:${l4} L7:${l7} L8:${l8}m`;
+  }
+  return `L1:${Number(l1).toFixed(1)} L7:${Number(l7).toFixed(1)} L8:${Number(l8).toFixed(2)}`;
+}
+
+function renderCustomArgsForm() {
+  const scopeSelect = document.getElementById('customLevelScope');
+  if (scopeSelect) scopeSelect.value = customArgsState.selectedScope;
+
+  const badgeText = customArgsState.selectedScope === 'all' ? 'ALL L1–8' : `L${customArgsState.selectedScope}`;
+  document.querySelectorAll('[data-scope-badge]').forEach(badge => {
+    badge.textContent = badgeText;
+  });
+
+  // Update 4 per-level sliders
+  for (const key of PER_LEVEL_CUSTOM_KEYS) {
+    const val = customArgsState.selectedScope === 'all'
+      ? customArgsState.uniformValues[key]
+      : getEffectivePerLevelValue(key, customArgsState.selectedScope);
+    const ctrl = document.getElementById(`ctrl_${key}`);
+    if (ctrl) {
+      ctrl.value = String(val);
+      syncRangeSliderProgress(ctrl);
+    }
+    const readout = document.getElementById(`val_${key}`);
+    if (readout) readout.textContent = formatCustomReadout(key, val);
+    const summary = document.getElementById(`summary_${key}`);
+    if (summary) summary.textContent = formatPerLevelSummary(key);
+  }
+
+  // Update scalar sliders
+  const scalarSliders = [
+    'MAX_QUOTE_MULTIPLIER',
+    'PRICE_WAR_MULTIPLIER',
+    'MAX_DEALER_TRUST_PCT',
+    'TARGET_ONTIME_SHARE',
+    'DEFAULT_MAX_FEE_MULTIPLE',
+    'STEEP_OPENING_MULTIPLE'
+  ];
+  for (const key of scalarSliders) {
+    const val = customArgsState.values[key];
+    const ctrl = document.getElementById(`ctrl_${key}`);
+    if (ctrl) {
+      ctrl.value = String(val);
+      syncRangeSliderProgress(ctrl);
+    }
+    const readout = document.getElementById(`val_${key}`);
+    if (readout) readout.textContent = formatCustomReadout(key, val);
+  }
+
+  // Update dropdown selects
+  syncSelectControlValue(
+    document.getElementById('ctrl_DEADLINE_EARLY_MINUTES'),
+    customArgsState.values.DEADLINE_EARLY_MINUTES,
+    v => `${v} min (${(v / 60).toFixed(1)}h)`
+  );
+  syncSelectControlValue(
+    document.getElementById('ctrl_QUICK_BOOK_MINUTES'),
+    customArgsState.values.QUICK_BOOK_MINUTES,
+    v => `${v} min`
+  );
+  syncSelectControlValue(
+    document.getElementById('ctrl_LOW_BATTERY_PERCENT'),
+    customArgsState.values.LOW_BATTERY_PERCENT,
+    v => `${v}% battery`
+  );
+}
+
+function handleCustomScopeChange(newScope) {
+  if (newScope === 'all' && customArgsState.selectedScope !== 'all') {
+    const refLvl = customArgsState.selectedScope || '8';
+    customArgsState.lastLevel = refLvl;
+    for (const key of PER_LEVEL_CUSTOM_KEYS) {
+      customArgsState.uniformValues[key] = getEffectivePerLevelValue(key, refLvl);
+    }
+  } else if (newScope !== 'all') {
+    customArgsState.lastLevel = newScope;
+  }
+  customArgsState.selectedScope = newScope;
+  renderCustomArgsForm();
+}
+
+function handleCustomControlInput(key, rawVal) {
+  const numVal = INT_CUSTOM_KEYS.has(key) ? Math.round(parseFloat(rawVal)) : parseFloat(rawVal);
+  if (!Number.isFinite(numVal)) return;
+
+  if (PER_LEVEL_CUSTOM_KEYS.includes(key)) {
+    if (customArgsState.selectedScope === 'all') {
+      customArgsState.uniformValues[key] = numVal;
+      if (key === 'MAX_FEE_MULTIPLE') {
+        customArgsState.values.DEFAULT_MAX_FEE_MULTIPLE = numVal;
+      }
+    } else {
+      if (!customArgsState.values[key] || typeof customArgsState.values[key] !== 'object') {
+        customArgsState.values[key] = {};
+      }
+      customArgsState.values[key][customArgsState.selectedScope] = numVal;
+    }
+  } else {
+    customArgsState.values[key] = numVal;
+  }
+
+  const ctrl = document.getElementById(`ctrl_${key}`);
+  if (ctrl && !SELECT_CUSTOM_KEYS.has(key)) {
+    syncRangeSliderProgress(ctrl);
+  }
+  renderCustomArgsForm();
+}
+
+function resetCustomArgsToDefaults() {
+  customArgsState.selectedScope = '8';
+  customArgsState.lastLevel = '8';
+  customArgsState.values = cloneCustomArgsDefaults();
+  customArgsState.uniformValues = {
+    PRICE_MULTIPLIER: 1.70,
+    SLACK_BUFFER: 120,
+    OPENING_FEE: 1.30,
+    MAX_FEE_MULTIPLE: 2.20
+  };
+  renderCustomArgsForm();
+  setCustomArgsStatus('Defaults restored in form — click "Write to custom_args.py" to apply.', 'info');
+}
+
+function setCustomArgsStatus(message, tone = 'neutral') {
+  const statusEl = document.getElementById('customArgsStatus');
+  if (!statusEl) return;
+  let icon = 'description';
+  let colorClass = 'text-on-surface-variant';
+  if (tone === 'success') {
+    icon = 'check_circle';
+    colorClass = 'text-secondary';
+  } else if (tone === 'error') {
+    icon = 'error';
+    colorClass = 'text-error';
+  } else if (tone === 'info') {
+    icon = 'info';
+    colorClass = 'text-primary';
+  }
+  statusEl.className = `text-xs font-mono ${colorClass} flex items-center gap-1.5`;
+  statusEl.innerHTML = `<span class="material-symbols-outlined text-[16px]">${icon}</span><span></span>`;
+  const textSpan = statusEl.querySelector('span:last-child');
+  if (textSpan) textSpan.textContent = message;
+}
+
+async function callCustomArgsApi(method = 'GET', payload = null) {
+  const candidates = [];
+  if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+    candidates.push('api/custom-args');
+  }
+  if (window.location.origin !== 'http://127.0.0.1:8000' && window.location.origin !== 'http://localhost:8000') {
+    candidates.push('http://127.0.0.1:8000/api/custom-args');
+  }
+
+  let lastError = null;
+  for (const url of candidates) {
+    try {
+      const options = {
+        method,
+        headers: payload ? { 'Content-Type': 'application/json' } : {}
+      };
+      if (payload) {
+        options.body = JSON.stringify(payload);
+      }
+      const res = await fetch(url, options);
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        lastError = new Error(`Static server at ${url} does not expose /api/custom-args.`);
+        continue;
+      }
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || `Server returned HTTP ${res.status}`);
+      }
+      return data;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error('API server unreachable');
+}
+
+function applyServerCustomArgs(data) {
+  if (!data || !data.values) return;
+  const v = data.values;
+  customArgsState.values = cloneCustomArgsDefaults();
+
+  for (const [key, val] of Object.entries(v)) {
+    if (PER_LEVEL_CUSTOM_KEYS.includes(key) && val && typeof val === 'object') {
+      customArgsState.values[key] = { ...val };
+    } else if (val !== undefined) {
+      customArgsState.values[key] = val;
+    }
+  }
+
+  for (const key of PER_LEVEL_CUSTOM_KEYS) {
+    customArgsState.uniformValues[key] = getEffectivePerLevelValue(key, '8');
+  }
+
+  if (data.scope === 'uniform') {
+    customArgsState.selectedScope = 'all';
+  } else if (customArgsState.selectedScope === 'all') {
+    customArgsState.selectedScope = customArgsState.lastLevel || '8';
+  }
+
+  renderCustomArgsForm();
+}
+
+async function openCustomArgsModal() {
+  const modal = document.getElementById('customArgsModal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  renderCustomArgsForm();
+  setCustomArgsStatus('Reading custom_args.py...', 'info');
+
+  try {
+    const data = await callCustomArgsApi('GET');
+    applyServerCustomArgs(data);
+    setCustomArgsStatus('Synced with custom_args.py', 'success');
+  } catch (_err) {
+    setCustomArgsStatus('Run "python3 website/server.py" to enable saving to custom_args.py', 'error');
+  }
+}
+
+function closeCustomArgsModal() {
+  const modal = document.getElementById('customArgsModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+async function submitCustomArgsForm(event) {
+  event.preventDefault();
+  const saveBtn = document.getElementById('saveCustomArgsBtn');
+  if (saveBtn) saveBtn.disabled = true;
+
+  const isUniform = customArgsState.selectedScope === 'all';
+  const payloadValues = {};
+
+  for (const [key, val] of Object.entries(customArgsState.values)) {
+    if (PER_LEVEL_CUSTOM_KEYS.includes(key)) {
+      payloadValues[key] = isUniform ? customArgsState.uniformValues[key] : { ...val };
+    } else {
+      payloadValues[key] = val;
+    }
+  }
+
+  setCustomArgsStatus('Writing custom_args.py...', 'info');
+  try {
+    const data = await callCustomArgsApi('POST', {
+      scope: isUniform ? 'uniform' : 'per_level',
+      values: payloadValues
+    });
+    applyServerCustomArgs(data);
+    setCustomArgsStatus('Saved to custom_args.py', 'success');
+    showNotification('Updated custom_args.py successfully.');
+    closeCustomArgsModal();
+  } catch (err) {
+    setCustomArgsStatus(`Cannot write custom_args.py — start server with: python3 website/server.py`, 'error');
+    console.warn('Failed to write custom_args.py:', err);
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+// ==========================================
+// 10. INITIALIZATION
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
   setupFileDrop();
+
+  // Close modals on Escape key
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeCustomArgsModal();
+      const dropzone = document.getElementById('dropzoneModal');
+      if (dropzone) dropzone.classList.add('hidden');
+    }
+  });
 
   // Search input handler
   const searchInput = document.getElementById('searchVehicleInput');

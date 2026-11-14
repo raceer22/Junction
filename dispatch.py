@@ -18,6 +18,8 @@ constraint that determines ranking.
 from __future__ import annotations
 
 import argparse
+import importlib.util
+from pathlib import Path
 import re
 import sys
 import time
@@ -32,23 +34,131 @@ from spread.types import (
 HOUR, DAY = 60, 24 * 60
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
-# Part B: react before the server's deadline_close (3 h before lastPickupAt). Once
-# the last pickup is within this many minutes, treat the order as urgent: steep
-# fees so drivers see the gig and reach it in time.
-DEADLINE_EARLY_MINUTES = 7 * HOUR
-# Opening fee as a multiple of the reference fee per car. Levels 1-6 have enough
-# drivers at the typical fee. Levels 7-8 are driver shortages: opening higher gets
-# a driver in the first minutes instead of waiting for the deadline warning.
-OPENING_FEE = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0, 6: 1.0, 7: 1.4, 8: 1.3}
+# ---------------------------------------------------------------- starting constants
+# Assembled centrally so `--custom` can override any subset from `custom_args.py`.
+# Without `--custom`, these exact defaults govern the entire run unchanged.
+
+# Part A (Quoting & Order Selection):
+# List price must cover this multiple of the reference fee for us to bid (per level).
+PRICE_MULTIPLIER: dict[int, float] = {1: 1.2, 2: 1.2, 3: 1.2, 4: 1.5, 5: 1.5, 6: 1.5, 7: 2.0, 8: 1.7}
+# Safety buffer (minutes) added to drive time when checking deadline slack (per level).
+SLACK_BUFFER: dict[int, int] = {1: 30, 2: 30, 3: 30, 4: 60, 5: 60, 6: 60, 7: 90, 8: 120}
+# Ceiling on the per-dealer adaptive quote multiplier when win rate is high.
+MAX_QUOTE_MULTIPLIER: float = 1.50
+# Per-dealer quote multiplier floor applied on suspected competitor price-war days.
+PRICE_WAR_MULTIPLIER: float = 1.15
+# Maximum level-8 dealer trust price bump (%), +1% per on-time order up to this cap.
+MAX_DEALER_TRUST_PCT: int = 25
+# Daily on-time share threshold below which market_pressure tightens the next day.
+TARGET_ONTIME_SHARE: float = 0.90
+
+# Part B (Dispatch & Driver Fees):
+# Opening fee as a multiple of the reference fee per car (per level).
+OPENING_FEE: dict[int, float] = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0, 6: 1.0, 7: 1.4, 8: 1.3}
 # The most we will ever pay a driver, as a multiple of the reference fee.
-MAX_FEE_MULTIPLE = {7: 2.0, 8: 2.2}
-# Part A: list price must cover this multiple of the reference fee for us to bid.
-PRICE_MULTIPLIER = {1: 1.2, 2: 1.2, 3: 1.2, 4: 1.5, 5: 1.5, 6: 1.5, 7: 2.0, 8: 1.7}
-# Part A: safety buffer (minutes) added to drive time when checking deadline slack.
-SLACK_BUFFER = {1: 30, 2: 30, 3: 30, 4: 60, 5: 60, 6: 60, 7: 90, 8: 120}
-# Part B: a gig booked within this many minutes of posting counts as "quick booking",
-# which lowers the opening-fee multiple.
-QUICK_BOOK_MINUTES = 60
+MAX_FEE_MULTIPLE: dict[int, float] = {7: 2.0, 8: 2.2}
+DEFAULT_MAX_FEE_MULTIPLE: float = 2.5
+# React before the server's deadline_close (3 h before lastPickupAt): once lastPickupAt
+# is within this many minutes, treat the order as urgent and use steep fees.
+DEADLINE_EARLY_MINUTES: int = 7 * HOUR
+# A gig booked within this many minutes of posting counts as "quick booking" (lowers fee_pressure).
+QUICK_BOOK_MINUTES: int = 60
+# Starting fee multiple (x base reference fee) for urgent steep fee schedules.
+STEEP_OPENING_MULTIPLE: float = 1.5
+# Electric car battery percentage below which a charging stop (withCharging) is added.
+LOW_BATTERY_PERCENT: int = 30
+
+CUSTOM_ARGS_FILE = Path(__file__).resolve().parent / "custom_args.py"
+
+_PER_LEVEL_FLOAT_CONSTANTS = ("PRICE_MULTIPLIER", "OPENING_FEE", "MAX_FEE_MULTIPLE")
+_PER_LEVEL_INT_CONSTANTS = ("SLACK_BUFFER",)
+_SCALAR_FLOAT_CONSTANTS = (
+    "MAX_QUOTE_MULTIPLIER",
+    "PRICE_WAR_MULTIPLIER",
+    "TARGET_ONTIME_SHARE",
+    "DEFAULT_MAX_FEE_MULTIPLE",
+    "STEEP_OPENING_MULTIPLE",
+)
+_SCALAR_INT_CONSTANTS = (
+    "DEADLINE_EARLY_MINUTES",
+    "QUICK_BOOK_MINUTES",
+    "MAX_DEALER_TRUST_PCT",
+    "LOW_BATTERY_PERCENT",
+)
+
+
+def apply_custom_constants(custom_file: Path = CUSTOM_ARGS_FILE) -> dict[str, object]:
+    """Overrides the starting constants above from `custom_args.py` (used only with `--custom`).
+    Per-level constants accept either a dict (merged over defaults, e.g. `{8: 1.5}`) or a single
+    number from a slider (applied across levels 1..8). Minute/percentage constants stay whole ints."""
+    if not custom_file.is_file():
+        raise FileNotFoundError(f"Custom constants file not found: {custom_file}")
+    spec = importlib.util.spec_from_file_location("custom_args", custom_file)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load custom constants from {custom_file}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    overrides: dict[str, object] = {}
+    if isinstance(getattr(module, "CUSTOM_CONSTANTS", None), dict):
+        overrides.update(getattr(module, "CUSTOM_CONSTANTS"))
+
+    all_names = (
+        _PER_LEVEL_FLOAT_CONSTANTS
+        + _PER_LEVEL_INT_CONSTANTS
+        + _SCALAR_FLOAT_CONSTANTS
+        + _SCALAR_INT_CONSTANTS
+    )
+    for name in all_names:
+        if hasattr(module, name):
+            overrides[name] = getattr(module, name)
+
+    applied: dict[str, object] = {}
+    g = globals()
+
+    for name in _PER_LEVEL_FLOAT_CONSTANTS:
+        if name in overrides and overrides[name] is not None:
+            raw = overrides[name]
+            if isinstance(raw, dict):
+                g[name] = {**g[name], **{int(k): float(v) for k, v in raw.items()}}
+            elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                scalar = float(raw)
+                g[name] = {lvl: scalar for lvl in range(1, 9)}
+                if name == "MAX_FEE_MULTIPLE":
+                    g["DEFAULT_MAX_FEE_MULTIPLE"] = scalar
+            else:
+                raise ValueError(f"{name} in {custom_file.name} must be a number or dict, got {type(raw).__name__}")
+            applied[name] = g[name]
+
+    for name in _PER_LEVEL_INT_CONSTANTS:
+        if name in overrides and overrides[name] is not None:
+            raw = overrides[name]
+            if isinstance(raw, dict):
+                g[name] = {**g[name], **{int(k): int(round(float(v))) for k, v in raw.items()}}
+            elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                scalar_int = int(round(float(raw)))
+                g[name] = {lvl: scalar_int for lvl in range(1, 9)}
+            else:
+                raise ValueError(f"{name} in {custom_file.name} must be a number or dict, got {type(raw).__name__}")
+            applied[name] = g[name]
+
+    for name in _SCALAR_FLOAT_CONSTANTS:
+        if name in overrides and overrides[name] is not None:
+            raw = overrides[name]
+            if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+                raise ValueError(f"{name} in {custom_file.name} must be a number, got {type(raw).__name__}")
+            g[name] = float(raw)
+            applied[name] = g[name]
+
+    for name in _SCALAR_INT_CONSTANTS:
+        if name in overrides and overrides[name] is not None:
+            raw = overrides[name]
+            if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+                raise ValueError(f"{name} in {custom_file.name} must be a number, got {type(raw).__name__}")
+            g[name] = int(round(float(raw)))
+            applied[name] = g[name]
+
+    return applied
 
 # The events that need an answer.
 WAKE_ON: list[DeskEventKind] = [
@@ -284,8 +394,8 @@ class Desk:
         price = option["listPriceCents"]
         if self.level >= 8:
             # Dealer trust (D7): each fully delivered on-time order raises that dealer's
-            # accepted-price bump by +1%, capped at 25%, applied to quotes at level 8.
-            trust = min(stats["on_time"], 25)
+            # accepted-price bump by +1%, capped at MAX_DEALER_TRUST_PCT%, applied to quotes at level 8.
+            trust = min(stats["on_time"], MAX_DEALER_TRUST_PCT)
             price = int(price * (1 + trust / 100) + 0.5)  # +0.5 = round half up
         # Part A (ticket 03): quote = list price x the per-dealer adaptive multiplier,
         # always whole cents and at or above list price when the multiplier is >= 1.
@@ -327,8 +437,8 @@ class Desk:
             self._last_completed_day = day
             return
         on_time_share = stats["on_time"] / total
-        # Below the 90% hard constraint: become more expensive & selective.
-        if on_time_share < 0.90:
+        # Below the target hard constraint: become more expensive & selective.
+        if on_time_share < TARGET_ONTIME_SHARE:
             self.market_pressure = min(self.market_pressure + 0.25, 1.0)
         # Well above 90%: relax to win more volume (dilutes late-order impact).
         elif on_time_share > 0.96:
@@ -359,10 +469,10 @@ class Desk:
             qst["price_war"] = True
         if qst["price_war"]:
             # Step back: quote higher on a price-war day so we avoid below-cost wins.
-            qst["multiplier"] = max(qst["multiplier"], 1.15)
+            qst["multiplier"] = max(qst["multiplier"], PRICE_WAR_MULTIPLIER)
         elif rate >= 0.70:
             # Ticket 03: high win rate - nudge the multiplier up to capture more margin.
-            qst["multiplier"] = min(qst["multiplier"] + 0.05, 1.50)
+            qst["multiplier"] = min(qst["multiplier"] + 0.05, MAX_QUOTE_MULTIPLIER)
         # Low win rate: hold the multiplier and keep bidding - never walk away from this lever.
         qst["multiplier"] = max(qst["multiplier"], 1.0)
         qst["base_rate"] = 0.85 * base + 0.15 * rate
@@ -379,7 +489,7 @@ class Desk:
         opening fee to attract drivers immediately on conservative lanes."""
         base = OPENING_FEE.get(self.level, 1.0)
         mult = base + self.market_pressure * 0.15
-        return min(max(mult, base), MAX_FEE_MULTIPLE.get(self.level, 2.5))
+        return min(max(mult, base), MAX_FEE_MULTIPLE.get(self.level, DEFAULT_MAX_FEE_MULTIPLE))
 
     def quote(self, request: PriceRequest) -> None:
         self.requests[request["id"]] = request
@@ -466,13 +576,13 @@ class Desk:
         """The fees for some of the order's cars from now: rising, or steep once its
         deadline warning has come, or we judge the deadline is close enough."""
         base = self.requests[order["id"]]["referenceFeeCents"] * cars / len(order["legs"])
-        cap = base * MAX_FEE_MULTIPLE.get(self.level, 2.5)
+        cap = base * MAX_FEE_MULTIPLE.get(self.level, DEFAULT_MAX_FEE_MULTIPLE)
         urgent = order["id"] in self.urgent or self.close_to_deadline(order)
         # Part B (ticket 06): adaptive opening-fee multiple - rises on unbooked gig expiry
         # and falls on quick booking via a fading running mean, re-tuned per day. Never below
         # the level's base opening fee and never above MAX_FEE_MULTIPLE.
         level_multiple = self._dynamic_opening_fee()
-        multiple = min(max(level_multiple + self.fee_pressure * 0.1, level_multiple), MAX_FEE_MULTIPLE.get(self.level, 2.5))
+        multiple = min(max(level_multiple + self.fee_pressure * 0.1, level_multiple), MAX_FEE_MULTIPLE.get(self.level, DEFAULT_MAX_FEE_MULTIPLE))
         opening = base * multiple
         schedule = steep(self.now, base, self.level) if urgent else rising(self.now, opening, self.level)
         # Never pay more than the order's revenue floor (~2x reference at shortage levels).
@@ -583,14 +693,14 @@ def rising(now: int, opening_fee: float, level: int) -> list[FeeStep]:
 
 
 def steep(now: int, base_fee: float, level: int) -> list[FeeStep]:
-    """1.5 times the fee at once, then a quarter of it more every half hour, up to 2.5 times.
+    """STEEP_OPENING_MULTIPLE times the fee at once, then a quarter of it more every half hour.
     Level 1 takes one fee only. fees_for() caps the result at MAX_FEE_MULTIPLE so we never
     pay more than the order's revenue floor."""
-    return [{"at": now + k * 30, "feeCents": max(1, int(base_fee * (1.5 + k / 4) + 0.5))} for k in range(1 if level == 1 else 5)]
+    return [{"at": now + k * 30, "feeCents": max(1, int(base_fee * (STEEP_OPENING_MULTIPLE + k / 4) + 0.5))} for k in range(1 if level == 1 else 5)]
 
 
 def stops_for(order: Order, legs: list[int], note: Optional[Note], retry: Retry) -> list[StopRef]:
-    """A pickup and a delivery for each leg. An electric car under 30% gets a charging stop.
+    """A pickup and a delivery for each leg. An electric car under LOW_BATTERY_PERCENT% gets a charging stop.
     A stop has its own window only when the note or the retry makes it narrower. Without
     one, the world plans the pickup in the order's window and the delivery by the deadline."""
     stops: list[StopRef] = []
@@ -601,7 +711,7 @@ def stops_for(order: Order, legs: list[int], note: Optional[Note], retry: Retry)
         pickup_window: TimeWindow = {"from": start, "to": max(noted["to"], start)}
         delivery_base: TimeWindow = {"from": delivery["window"]["from"], "to": max(delivery["window"]["from"], order["deadline"])}
         delivery_window = window_from_note(note, delivery_base, "delivery")
-        low_battery = car["electric"] and car["chargePercent"] is not None and car["chargePercent"] < 30
+        low_battery = car["electric"] and car["chargePercent"] is not None and car["chargePercent"] < LOW_BATTERY_PERCENT
         first: StopRef = {"orderId": order["id"], "leg": leg, "kind": "pickup", "withPlates": retry.plates, "withCharging": low_battery}
         second: StopRef = {"orderId": order["id"], "leg": leg, "kind": "delivery"}
         stops += [narrower(first, pickup_window, pickup["window"]), narrower(second, delivery_window, delivery_base)]
@@ -729,7 +839,11 @@ def main() -> None:
     parser.add_argument("--seed", help="any text; the same seed gives the same world")
     parser.add_argument("--board", action="store_true", help="play your next ranking run at the level; it counts in the practice rankings")
     parser.add_argument("--final", action="store_true", help="play your copy of the final from the live stream")
+    parser.add_argument("--custom", action="store_true", help="override starting constants from custom_args.py")
     args = parser.parse_args()
+    if args.custom:
+        applied = apply_custom_constants()
+        print(f"Custom constants loaded from {CUSTOM_ARGS_FILE.name} ({len(applied)} setting(s)).", flush=True)
     try:
         client = Client()
         score = None
