@@ -2,7 +2,7 @@ import csv
 import json
 from collections import defaultdict
 
-BASE = "/practice_level_5/"
+BASE = "practice_level_5/"
 
 # --- Parse requests.csv ---
 # We need: request id -> referenceFeeCents, and for the winning option: listPriceCents, quoteCents
