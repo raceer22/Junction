@@ -20,6 +20,10 @@ from spread.types import (
 
 HOUR, DAY = 60, 24 * 60
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+# Part B: start reacting before the server's deadline_close (3 h before lastPickupAt).
+# Once the last pickup is within this many minutes, treat the order as urgent: steep
+# fees and (optionally) direct offers, so drivers have time to see the gig and reach it.
+DEADLINE_EARLY_MINUTES = 7 * HOUR
 # The events that need an answer. Views and account lines arrive with the next event that needs an answer.
 WAKE_ON: list[DeskEventKind] = ["price_request", "order_won", "order_changed", "order_cancelled", "visit_failed", "gig_expired", "deadline_close"]
 
@@ -44,13 +48,6 @@ class Desk:
         self.booked: set[str] = set()  # the gigs that a driver holds now
         self.posts: dict[str, PostAction] = {}  # gig id -> the post that made it
         self.urgent: set[str] = set()  # the orders whose deadline warning has come
-        self.constants()
-    
-    def constants(self):
-        # Safety
-        # self.
-
-    
 
     def rejoin(self, snapshot: DeskSnapshot, history: list[DeskEvent]) -> None:
         """Rebuilds what it knows from the world, so a starter that stopped keeps its orders. Then answers
@@ -109,19 +106,21 @@ class Desk:
 
     def quote(self, request: PriceRequest) -> None:
         self.requests[request["id"]] = request
-        first = request["options"][1]
+        first = request["options"][0]
         self.outbox.append({"type": "quote", "requestId": request["id"], "prices": {first["kind"]: first["listPriceCents"]}})
 
     def win(self, order: Order) -> None:
         if order["id"] in self.requests and order["id"] not in self.orders:  # rejoin can know it already
             self.orders[order["id"]] = order
             self.post(order, undelivered(order))
+            self.maybe_raise_early(order["id"])
 
     def change(self, order: Order) -> None:
         if order["id"] in self.orders:
             self.orders[order["id"]] = order
             if self.withdraw(order["id"]):
                 self.post(order, undelivered(order))
+            self.maybe_raise_early(order["id"])
 
     def repost(self, gig_id: str) -> None:
         """Posts a gig again when one of its windows ended before a driver booked it."""
@@ -149,10 +148,27 @@ class Desk:
             if gig_id not in self.booked:
                 self.outbox.append({"type": "reprice", "gigId": gig_id, "schedule": self.fees_for(order, pickups(self.posts[gig_id]))})
 
+    def close_to_deadline(self, order: Order) -> bool:
+        """True when the order still has no driver and its last pickup is approaching,
+        so we should already react as if deadline_close had come."""
+        last = order.get("lastPickupAt")
+        if last is None:
+            return False
+        return 0 < last - self.now <= DEADLINE_EARLY_MINUTES
+
+    def maybe_raise_early(self, order_id: str) -> None:
+        """Start steep fees early when the last pickup is approaching but the server's
+        deadline_close warning has not come yet (or has not been handled yet)."""
+        order = self.orders.get(order_id)
+        if order is not None and self.close_to_deadline(order):
+            self.raise_fees(order_id)
+
     def fees_for(self, order: Order, cars: int) -> list[FeeStep]:
-        """The fees for some of the order's cars from now: rising, or steep once its deadline warning has come."""
+        """The fees for some of the order's cars from now: rising, or steep once its
+        deadline warning has come, or we judge the deadline is close enough."""
         fee = self.requests[order["id"]]["referenceFeeCents"] * cars / len(order["legs"])
-        return steep(self.now, fee, self.level) if order["id"] in self.urgent else rising(self.now, fee, self.level)
+        urgent = order["id"] in self.urgent or self.close_to_deadline(order)
+        return steep(self.now, fee, self.level) if urgent else rising(self.now, fee, self.level)
 
     def retry(self, order_id: str, leg: int, reason: str) -> None:
         if order_id in self.orders:
