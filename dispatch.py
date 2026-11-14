@@ -44,6 +44,13 @@ class Desk:
         self.booked: set[str] = set()  # the gigs that a driver holds now
         self.posts: dict[str, PostAction] = {}  # gig id -> the post that made it
         self.urgent: set[str] = set()  # the orders whose deadline warning has come
+        self.constants()
+    
+    def constants(self):
+        # Safety
+        # self.
+
+    
 
     def rejoin(self, snapshot: DeskSnapshot, history: list[DeskEvent]) -> None:
         """Rebuilds what it knows from the world, so a starter that stopped keeps its orders. Then answers
@@ -102,7 +109,7 @@ class Desk:
 
     def quote(self, request: PriceRequest) -> None:
         self.requests[request["id"]] = request
-        first = request["options"][0]
+        first = request["options"][1]
         self.outbox.append({"type": "quote", "requestId": request["id"], "prices": {first["kind"]: first["listPriceCents"]}})
 
     def win(self, order: Order) -> None:
