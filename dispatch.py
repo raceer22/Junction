@@ -56,6 +56,7 @@ class Desk:
         self.posts: dict[str, PostAction] = {}  # gig id -> the post that made it
         self.urgent: set[str] = set()  # the orders whose deadline warning has come
         self._roads: Optional[dict[tuple[str, str], int]] = None  # (from, to) -> driving minutes, loaded lazily
+        self.dealer_stats: dict[str, dict] = {} 
 
     def rejoin(self, snapshot: DeskSnapshot, history: list[DeskEvent]) -> None:
         """Rebuilds what it knows from the world, so a starter that stopped keeps its orders. Then answers
@@ -165,25 +166,32 @@ class Desk:
             return False
         return True
 
+    def _quote_price(self, request: PriceRequest, option: dict, stats: dict) -> int:
+        price = option["listPriceCents"]
+        if self.level >= 8:
+            # Dealer trust: each on-time delivery raises accepted prices by 1% (cap 25%).
+            # Be conservative: take half the trust as extra margin.
+            trust = min(stats["on_time"], 25)
+            price = int(price * (1 + trust / 200) + 0.5)  # +0.5 = round half up
+        # Levels 1-7: quote at list price (competitor is at or above list; L1-3 no competitor).
+        return max(1, price)
 
     def quote(self, request: PriceRequest) -> None:
         self.requests[request["id"]] = request
-        # Among the options, keep only those that are both safely achievable and profitable.
-        # Quote the single best (highest margin) one; quoting more gives the dealer a choice
-        # that could steer them to a less profitable option.
-        best: Optional[tuple[str, int]] = None  # (option kind, price)
+        dealer = request["dealerId"]
+        stats = self.dealer_stats.setdefault(dealer, {"won": 0, "lost": 0, "on_time": 0, "late": 0})
+        prices: dict[str, int] = {}
         for option in request["options"]:
             if not self._should_bid(request, option):
                 continue
-            # Margin estimate: list price minus the base driver fee (one reference fee per gig)
-            margin = option["listPriceCents"] - request["referenceFeeCents"]
-            if best is None or margin > best[1]:
-                best = (option["kind"], option["listPriceCents"])
-        if best is None:
-            # No safe and profitable option: better to lose the order than to lose money on it.
-            best = (option["kind"], LARGE_QUOTE)
-            
-        self.outbox.append({"type": "quote", "requestId": request["id"], "prices": {best[0]: best[1]}})
+            prices[option["kind"]] = self._quote_price(request, option, stats)
+        if not prices:
+            # Decline: quote far above list on the first option (a losing quote costs nothing;
+            # not quoting at all costs dealer goodwill).
+            first = request["options"][0] if request["options"] else None
+            if first is not None:
+                prices[first["kind"]] = LARGE_QUOTE
+        self.outbox.append({"type": "quote", "requestId": request["id"], "prices": prices})
 
     def win(self, order: Order) -> None:
         if order["id"] in self.requests and order["id"] not in self.orders:  # rejoin can know it already
