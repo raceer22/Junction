@@ -13,7 +13,10 @@ const state = {
   gigs: {},         // gigId -> { id, driverId, feeCents, status, postedAt, orderId }
   drivers: {},      // driverId -> { id, home, rating, licence, completedGigs, trips: [] }
   requests: {},     // orderId -> { id, dealerId, arrivedAt, outcome, option, quoteCents }
-  events: [],       // sorted by [at, seq]
+  wonPrices: {},    // orderId -> priceCents from order_won
+  events: [],       // operational events sorted by [at, seq]
+  ledgerEvents: [], // ledger money-in/out events sorted by [at, seq]
+  gigCosts: [],     // fallback cost entries [{ at, cents }] when ledgerEvents are absent
   
   t: 566,           // Current simulation minute (default Monday morning)
   minT: 0,
@@ -26,7 +29,6 @@ const state = {
   mapView: 'leaflet', // 'leaflet' or 'vector'
   showCars: true,
   showDrivers: true,
-  showRoads: true,
   showLabels: true,
   filterQuery: '',
   selectedEntity: null,
@@ -34,7 +36,6 @@ const state = {
   // Leaflet references
   leafletMap: null,
   vehicleLayerGroup: null,
-  roadsLayerGroup: null,
   placesLayerGroup: null
 };
 
@@ -121,128 +122,181 @@ function parseCSV(text) {
 // 3. INGESTION & DATASET INDEXING
 // ==========================================
 function indexDataset(raw) {
+  const toList = (val) => (Array.isArray(val) ? val : (val && typeof val === 'object' ? Object.values(val) : []));
+
   // 1. Places
   state.places = {};
-  if (raw.places) {
-    for (const p of raw.places) {
-      if (!p.id) continue;
-      state.places[p.id] = {
-        id: p.id,
-        name: p.name || p.id,
-        lat: parseFloat(p.lat),
-        lon: parseFloat(p.lon)
-      };
-    }
+  for (const p of toList(raw.places)) {
+    if (!p.id) continue;
+    state.places[p.id] = {
+      id: p.id,
+      name: p.name || p.id,
+      lat: parseFloat(p.lat),
+      lon: parseFloat(p.lon)
+    };
   }
 
   // 2. Roads
   state.roads = [];
-  if (raw.roads) {
-    for (const r of raw.roads) {
-      if (r.from && r.to && r.from !== r.to) {
-        state.roads.push({
-          from: r.from,
-          to: r.to,
-          km: parseFloat(r.km || 0),
-          minutes: parseFloat(r.minutes || 0)
-        });
-      }
+  for (const r of toList(raw.roads)) {
+    if (r.from && r.to && r.from !== r.to) {
+      state.roads.push({
+        from: r.from,
+        to: r.to,
+        km: parseFloat(r.km || 0),
+        minutes: parseFloat(r.minutes || 0)
+      });
     }
   }
 
   // 3. Legs
   state.legs = {};
-  if (raw.legs) {
-    for (const l of raw.legs) {
-      const orderId = l.requestId || l.orderId;
-      if (!orderId) continue;
-      state.legs[orderId] = {
-        orderId: orderId,
-        leg: parseInt(l.leg || 0, 10),
-        pickupPlaceId: l['pickup.placeId'] || l.pickupPlaceId,
-        deliveryPlaceId: l['delivery.placeId'] || l.deliveryPlaceId,
-        readyAt: l['truth.readyAt'] ? parseInt(l['truth.readyAt'], 10) : (l.readyAt ? parseInt(l.readyAt, 10) : null),
-        pickedUpAt: l['truth.pickedUpAt'] ? parseInt(l['truth.pickedUpAt'], 10) : (l.pickedUpAt ? parseInt(l.pickedUpAt, 10) : null),
-        deliveredAt: l['truth.deliveredAt'] ? parseInt(l['truth.deliveredAt'], 10) : (l.deliveredAt ? parseInt(l.deliveredAt, 10) : null),
-        isElectric: l['car.electric'] === 'true' || l.isElectric === true,
-        isPremium: l['car.premium'] === 'true' || l.isPremium === true
-      };
-    }
+  for (const l of toList(raw.legs)) {
+    const orderId = l.requestId || l.orderId;
+    if (!orderId) continue;
+    state.legs[orderId] = {
+      orderId: orderId,
+      leg: parseInt(l.leg || 0, 10),
+      pickupPlaceId: l['pickup.placeId'] || l.pickupPlaceId,
+      deliveryPlaceId: l['delivery.placeId'] || l.deliveryPlaceId,
+      readyAt: l['truth.readyAt'] ? parseInt(l['truth.readyAt'], 10) : (l.readyAt ? parseInt(l.readyAt, 10) : null),
+      pickedUpAt: l['truth.pickedUpAt'] ? parseInt(l['truth.pickedUpAt'], 10) : (l.pickedUpAt ? parseInt(l.pickedUpAt, 10) : null),
+      deliveredAt: l['truth.deliveredAt'] ? parseInt(l['truth.deliveredAt'], 10) : (l.deliveredAt ? parseInt(l.deliveredAt, 10) : null),
+      isElectric: l['car.electric'] === 'true' || l.isElectric === true,
+      isPremium: l['car.premium'] === 'true' || l.isPremium === true
+    };
   }
 
   // 4. Gigs
   state.gigs = {};
-  if (raw.gigs) {
-    for (const g of raw.gigs) {
-      if (!g.id) continue;
-      state.gigs[g.id] = {
-        id: g.id,
-        driverId: g.driverId || null,
-        feeCents: parseInt(g.feeCents || 0, 10),
-        status: g.status,
-        postedAt: parseInt(g.postedAt || 0, 10),
-        orderId: g.orders || g.orderId || null
-      };
-    }
+  for (const g of toList(raw.gigs)) {
+    if (!g.id) continue;
+    state.gigs[g.id] = {
+      id: g.id,
+      driverId: g.driverId || null,
+      feeCents: parseInt(g.feeCents || 0, 10),
+      status: g.status,
+      postedAt: parseInt(g.postedAt || 0, 10),
+      orderId: g.orders || g.orderId || null
+    };
   }
 
   // 5. Drivers
   state.drivers = {};
-  if (raw.drivers) {
-    for (const d of raw.drivers) {
-      if (!d.id) continue;
-      state.drivers[d.id] = {
-        id: d.id,
-        home: d.homePlaceId || d.home || 'helsinki',
-        rating: parseFloat(d.rating || 5.0),
-        licence: d.licence || 'manual',
-        completedGigs: parseInt(d.completedGigs || 0, 10),
-        drops: parseInt(d.drops || 0, 10),
-        trips: []
-      };
-    }
+  for (const d of toList(raw.drivers)) {
+    if (!d.id) continue;
+    state.drivers[d.id] = {
+      id: d.id,
+      home: d.homePlaceId || d.home || 'helsinki',
+      rating: parseFloat(d.rating || 5.0),
+      licence: d.licence || 'manual',
+      completedGigs: parseInt(d.completedGigs || 0, 10),
+      drops: parseInt(d.drops || 0, 10),
+      trips: []
+    };
   }
 
   // 6. Requests
   state.requests = {};
-  if (raw.requests) {
-    for (const req of raw.requests) {
-      if (!req.id) continue;
-      const quote = req['same_day.quoteCents'] || req['next_day.quoteCents'] || req['within_3_days.quoteCents'] || req.quoteCents || 0;
-      state.requests[req.id] = {
-        id: req.id,
-        dealerId: req.dealerId,
-        arrivedAt: parseInt(req.arrivedAt || 0, 10),
-        outcome: req.outcome,
-        option: req.option,
-        quoteCents: parseInt(quote, 10)
-      };
-    }
+  for (const req of toList(raw.requests)) {
+    if (!req.id) continue;
+    const optionKey = req.option ? `${req.option}.quoteCents` : null;
+    const quote = (optionKey && req[optionKey] !== undefined && req[optionKey] !== '')
+      ? req[optionKey]
+      : (req.quoteCents || req['same_day.quoteCents'] || req['next_day.quoteCents'] || req['within_3_days.quoteCents'] || 0);
+    state.requests[req.id] = {
+      id: req.id,
+      dealerId: req.dealerId,
+      arrivedAt: parseInt(req.arrivedAt || 0, 10),
+      outcome: req.outcome,
+      option: req.option,
+      quoteCents: parseInt(quote, 10) || 0
+    };
   }
 
-  // 7. Events
+  // 7. Events & Ledger
   state.events = [];
-  if (raw.events) {
-    for (const ev of raw.events) {
-      const at = parseInt(ev.at || 0, 10);
-      const seq = parseInt(ev.seq || 0, 10);
-      const kind = ev.kind;
-      if (['order_won', 'gig_booked', 'gig_started', 'picked_up', 'delivered', 'no_show', 'order_cancelled'].includes(kind)) {
-        state.events.push({
+  state.ledgerEvents = [];
+  state.wonPrices = {};
+  const gigDeliveredAt = {};
+  const gigBookedFee = {};
+
+  for (const ev of toList(raw.events)) {
+    const at = parseInt(ev.at || 0, 10);
+    const seq = parseInt(ev.seq || 0, 10);
+    const kind = ev.kind;
+
+    if (kind === 'ledger') {
+      const rawCents = ev['line.cents'] !== undefined && ev['line.cents'] !== ''
+        ? ev['line.cents']
+        : (ev.line && ev.line.cents !== undefined ? ev.line.cents : ev.cents);
+      const cents = parseInt(rawCents, 10);
+      if (Number.isFinite(cents)) {
+        state.ledgerEvents.push({
           seq,
           at,
-          kind,
-          orderId: ev.orderId || ev['order.id'] || null,
-          gigId: ev.gigId || null,
-          driverId: ev.driverId || null,
-          placeId: ev.placeId || null,
-          feeCents: ev.feeCents ? parseInt(ev.feeCents, 10) : null,
-          priceCents: ev['order.priceCents'] ? parseInt(ev['order.priceCents'], 10) : (ev.priceCents ? parseInt(ev.priceCents, 10) : null)
+          ledgerKind: ev['line.kind'] || (ev.line && ev.line.kind) || ev.ledgerKind || '',
+          cents,
+          orderId: ev['line.orderId'] || (ev.line && ev.line.orderId) || ev.orderId || null,
+          gigId: ev['line.gigId'] || (ev.line && ev.line.gigId) || ev.gigId || null
         });
       }
+      continue;
     }
-    state.events.sort((a, b) => a.at - b.at || a.seq - b.seq);
+
+    if (['order_won', 'gig_booked', 'gig_started', 'picked_up', 'delivered', 'no_show', 'order_cancelled'].includes(kind)) {
+      const orderId = ev.orderId || ev['order.id'] || null;
+      const gigId = ev.gigId || null;
+      const feeCents = ev.feeCents !== undefined && ev.feeCents !== null && ev.feeCents !== '' ? parseInt(ev.feeCents, 10) : null;
+      const priceCents = ev['order.priceCents'] !== undefined && ev['order.priceCents'] !== null && ev['order.priceCents'] !== ''
+        ? parseInt(ev['order.priceCents'], 10)
+        : (ev.priceCents !== undefined && ev.priceCents !== null && ev.priceCents !== '' ? parseInt(ev.priceCents, 10) : null);
+
+      if (kind === 'order_won' && orderId && Number.isFinite(priceCents)) {
+        state.wonPrices[orderId] = priceCents;
+      }
+      if (kind === 'gig_booked' && gigId && Number.isFinite(feeCents)) {
+        gigBookedFee[gigId] = feeCents;
+      }
+      if (kind === 'delivered' && gigId) {
+        gigDeliveredAt[gigId] = Math.max(gigDeliveredAt[gigId] || 0, at);
+      }
+
+      state.events.push({
+        seq,
+        at,
+        kind,
+        orderId,
+        gigId,
+        driverId: ev.driverId || null,
+        placeId: ev.placeId || null,
+        feeCents,
+        priceCents
+      });
+    }
   }
+  state.events.sort((a, b) => a.at - b.at || a.seq - b.seq);
+  state.ledgerEvents.sort((a, b) => a.at - b.at || a.seq - b.seq);
+
+  // Precompute fallback gig fee costs (paid when a gig completes) for datasets without ledger events
+  state.gigCosts = [];
+  const countedGigs = new Set();
+  for (const g of Object.values(state.gigs)) {
+    const completedAt = gigDeliveredAt[g.id] ?? (g.status === 'done' && g.orderId ? state.legs[g.orderId]?.deliveredAt : null);
+    if (completedAt !== undefined && completedAt !== null && (g.status === 'done' || gigDeliveredAt[g.id] !== undefined)) {
+      const fee = g.feeCents || gigBookedFee[g.id] || 0;
+      if (fee > 0) {
+        state.gigCosts.push({ at: completedAt, cents: fee });
+        countedGigs.add(g.id);
+      }
+    }
+  }
+  for (const [gigId, completedAt] of Object.entries(gigDeliveredAt)) {
+    if (!countedGigs.has(gigId) && gigBookedFee[gigId] > 0) {
+      state.gigCosts.push({ at: completedAt, cents: gigBookedFee[gigId] });
+    }
+  }
+  state.gigCosts.sort((a, b) => a.at - b.at);
 
   // Reconstruct Driver Paths & Gigs
   reconstructDriverTrips();
@@ -251,6 +305,10 @@ function indexDataset(raw) {
   let minTime = Infinity;
   let maxTime = -Infinity;
   for (const ev of state.events) {
+    if (ev.at < minTime) minTime = ev.at;
+    if (ev.at > maxTime) maxTime = ev.at;
+  }
+  for (const ev of state.ledgerEvents) {
     if (ev.at < minTime) minTime = ev.at;
     if (ev.at > maxTime) maxTime = ev.at;
   }
@@ -341,46 +399,34 @@ function setupLeafletMap() {
     zoomControl: false
   });
 
-  // Dark Matter tiles from CartoDB
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-    subdomains: 'abcd',
-    maxZoom: 19
+  // Map tile layer (reads optional API key & tile URL from window.APP_CONFIG in website/config.js)
+  const appConfig = window.APP_CONFIG || {};
+  const apiKey = (appConfig.MAP_API_KEY || '').trim();
+  let tileUrl = appConfig.MAP_TILE_URL || 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+  if (apiKey) {
+    const encodedKey = encodeURIComponent(apiKey);
+    if (tileUrl.includes('{apiKey}')) {
+      tileUrl = tileUrl.replace('{apiKey}', encodedKey);
+    } else {
+      const separator = tileUrl.includes('?') ? '&' : '?';
+      tileUrl = `${tileUrl}${separator}key=${encodedKey}`;
+    }
+  }
+
+
+  L.tileLayer(tileUrl, {
+    attribution: appConfig.MAP_TILE_ATTRIBUTION || '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    subdomains: appConfig.MAP_TILE_SUBDOMAINS || 'abcd',
+    maxZoom: appConfig.MAP_TILE_MAX_ZOOM || 19
   }).addTo(state.leafletMap);
 
   L.control.zoom({ position: 'topright' }).addTo(state.leafletMap);
 
   // Layer groups
-  state.roadsLayerGroup = L.layerGroup().addTo(state.leafletMap);
   state.placesLayerGroup = L.layerGroup().addTo(state.leafletMap);
   state.vehicleLayerGroup = L.layerGroup().addTo(state.leafletMap);
 
-  drawLeafletRoads();
   drawLeafletPlaces();
-}
-
-function drawLeafletRoads() {
-  if (!state.roadsLayerGroup) return;
-  state.roadsLayerGroup.clearLayers();
-  if (!state.showRoads) return;
-
-  const drawnPairs = new Set();
-  for (const road of state.roads) {
-    const p1 = state.places[road.from];
-    const p2 = state.places[road.to];
-    if (!p1 || !p2) continue;
-
-    const pairKey = [road.from, road.to].sort().join('--');
-    if (drawnPairs.has(pairKey)) continue;
-    drawnPairs.add(pairKey);
-
-    L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
-      color: '#1c2b46',
-      weight: 2,
-      opacity: 0.65,
-      interactive: false
-    }).addTo(state.roadsLayerGroup);
-  }
 }
 
 function drawLeafletPlaces() {
@@ -423,34 +469,6 @@ function drawLeafletPlaces() {
 function renderVectorMap() {
   const svg = document.getElementById('finlandMapSvg');
   if (!svg) return;
-
-  // Draw Roads
-  const roadsGroup = document.getElementById('roadsBaseLayer');
-  if (roadsGroup) {
-    roadsGroup.innerHTML = '';
-    const drawnPairs = new Set();
-    for (const r of state.roads) {
-      const p1 = state.places[r.from];
-      const p2 = state.places[r.to];
-      if (!p1 || !p2) continue;
-      const key = [r.from, r.to].sort().join('--');
-      if (drawnPairs.has(key)) continue;
-      drawnPairs.add(key);
-
-      const pt1 = projectGeo(p1.lon, p1.lat);
-      const pt2 = projectGeo(p2.lon, p2.lat);
-
-      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      line.setAttribute('x1', pt1.x);
-      line.setAttribute('y1', pt1.y);
-      line.setAttribute('x2', pt2.x);
-      line.setAttribute('y2', pt2.y);
-      line.setAttribute('stroke', '#1c2b46');
-      line.setAttribute('stroke-width', '2.5');
-      line.setAttribute('stroke-linecap', 'round');
-      roadsGroup.appendChild(line);
-    }
-  }
 
   // Draw City Nodes
   const nodesGroup = document.getElementById('tacticalNodesGroup');
@@ -502,7 +520,7 @@ function computeActiveTransits(currentMinute) {
     if (!pickup || !delivery) continue;
 
     const req = state.requests[leg.orderId];
-    const quoteCents = req ? req.quoteCents : 0;
+    const quoteCents = (req && req.quoteCents) ? req.quoteCents : (state.wonPrices[leg.orderId] || 0);
 
     if (leg.readyAt && currentMinute >= leg.readyAt) cumulativeWon++;
 
@@ -541,11 +559,37 @@ function computeActiveTransits(currentMinute) {
     }
   }
 
+  // Compute cumulative costs & margin = revenue - costs
+  let cumulativeCosts = 0;
+  let cumulativeMargin = 0;
+
+  if (state.ledgerEvents.length > 0) {
+    let ledgerRevenue = 0;
+    for (const ev of state.ledgerEvents) {
+      if (ev.at > currentMinute) break;
+      if (ev.cents >= 0) {
+        ledgerRevenue += ev.cents;
+      } else {
+        cumulativeCosts += -ev.cents;
+      }
+    }
+    cumulativeRevenue = ledgerRevenue;
+    cumulativeMargin = ledgerRevenue - cumulativeCosts;
+  } else {
+    for (const cost of state.gigCosts) {
+      if (cost.at > currentMinute) break;
+      cumulativeCosts += cost.cents;
+    }
+    cumulativeMargin = cumulativeRevenue - cumulativeCosts;
+  }
+
   return {
     activeTransits,
     cumulativeDelivered,
     cumulativeWon,
     cumulativeRevenue,
+    cumulativeCosts,
+    cumulativeMargin,
     onTimeDeliveries
   };
 }
@@ -553,6 +597,12 @@ function computeActiveTransits(currentMinute) {
 // Update simulation at minute t
 function updateSimulation(t) {
   state.t = t;
+  const scrubber = document.getElementById('timelineScrubber');
+  if (scrubber) {
+    const span = state.maxT - state.minT;
+    const pct = span > 0 ? Math.max(0, Math.min(100, ((t - state.minT) / span) * 100)) : 0;
+    scrubber.style.setProperty('--progress', `${pct}%`);
+  }
   const metrics = computeActiveTransits(t);
 
   // Filter active transits if search box is filled
@@ -702,8 +752,49 @@ function updateHUD(metrics, t) {
   const kpiDelivered = document.getElementById('kpiDeliveredGigs');
   if (kpiDelivered) kpiDelivered.innerHTML = `${metrics.cumulativeDelivered} <span class="text-on-surface-variant font-normal text-xs">DELIVERED</span>`;
 
+  const formatEuros = (cents, signed = false) => {
+    const absEuros = Math.abs(cents) / 100;
+    const formatted = absEuros.toLocaleString('en-US', {
+      minimumFractionDigits: cents % 100 === 0 ? 0 : 2,
+      maximumFractionDigits: 2
+    });
+    if (cents < 0) return `-€${formatted}`;
+    if (signed && cents > 0) return `+€${formatted}`;
+    return `€${formatted}`;
+  };
+
+  const marginCard = document.getElementById('kpiMarginCard');
+  const marginEl = document.getElementById('kpiCumulativeMargin');
+  const marginIcon = document.getElementById('kpiMarginIcon');
+  const marginBreakdown = document.getElementById('kpiMarginBreakdown');
+  if (marginEl) {
+    marginEl.textContent = formatEuros(metrics.cumulativeMargin, true);
+  }
+  if (marginBreakdown) {
+    marginBreakdown.textContent = `Rev ${formatEuros(metrics.cumulativeRevenue)} − Costs ${formatEuros(metrics.cumulativeCosts)}`;
+  }
+  if (marginCard && marginEl && marginIcon) {
+    const isPositive = metrics.cumulativeMargin > 0;
+    const isNegative = metrics.cumulativeMargin < 0;
+    marginCard.className = isNegative
+      ? 'flex items-center gap-3.5 px-5 py-2.5 rounded-lg bg-surface-container-high border border-error/45 shadow-[0_0_20px_rgba(255,82,82,0.14)] transition-colors'
+      : isPositive
+        ? 'flex items-center gap-3.5 px-5 py-2.5 rounded-lg bg-surface-container-high border border-secondary/35 shadow-[0_0_20px_rgba(78,222,163,0.12)] transition-colors'
+        : 'flex items-center gap-3.5 px-5 py-2.5 rounded-lg bg-surface-container-high border border-white/10 shadow-md transition-colors';
+    marginEl.className = isNegative
+      ? 'text-2xl font-bold font-mono text-error leading-tight'
+      : isPositive
+        ? 'text-2xl font-bold font-mono text-secondary leading-tight'
+        : 'text-2xl font-bold font-mono text-on-surface leading-tight';
+    marginIcon.className = isNegative
+      ? 'material-symbols-outlined text-[24px] text-error'
+      : isPositive
+        ? 'material-symbols-outlined text-[24px] text-secondary'
+        : 'material-symbols-outlined text-[24px] text-on-surface';
+  }
+
   const kpiRevenue = document.getElementById('kpiCumulativeRevenue');
-  if (kpiRevenue) kpiRevenue.textContent = `€${(metrics.cumulativeRevenue / 100).toLocaleString('en-US', { minimumFractionDigits: 0 })}`;
+  if (kpiRevenue) kpiRevenue.textContent = formatEuros(metrics.cumulativeRevenue);
 
   const onTimeRate = metrics.cumulativeDelivered > 0 ? ((metrics.onTimeDeliveries / metrics.cumulativeDelivered) * 100).toFixed(1) : '100.0';
   const kpiRate = document.getElementById('kpiUtilization');
@@ -922,17 +1013,22 @@ function jumpToNextEvent() {
 }
 
 // Layer toggles
+function syncLayerToggleButton(btnId, isActive) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.className = isActive
+    ? 'px-2.5 py-1 rounded bg-primary text-surface font-bold flex items-center gap-1 transition-all'
+    : 'px-2.5 py-1 rounded bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface flex items-center gap-1 transition-all border border-white/5';
+  btn.setAttribute('aria-pressed', String(isActive));
+}
+
 function toggleMapLayer(layer) {
   if (layer === 'vehicles') {
     state.showCars = !state.showCars;
-    const btn = document.getElementById('toggleVehiclesBtn');
-    if (btn) btn.classList.toggle('opacity-50');
-  } else if (layer === 'roads') {
-    state.showRoads = !state.showRoads;
-    drawLeafletRoads();
-    renderVectorMap();
+    syncLayerToggleButton('toggleVehiclesBtn', state.showCars);
   } else if (layer === 'labels') {
     state.showLabels = !state.showLabels;
+    syncLayerToggleButton('toggleLabelsBtn', state.showLabels);
     drawLeafletPlaces();
     renderVectorMap();
   }

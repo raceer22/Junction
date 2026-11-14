@@ -156,6 +156,18 @@
       </div>
     </div>
 
+    <!-- Central Cumulative Margin Box -->
+    <div id="kpiMarginCard" class="flex items-center gap-3.5 px-5 py-2.5 rounded-lg bg-surface-container-high border border-white/10 shadow-md transition-colors">
+      <div class="w-10 h-10 rounded-lg bg-surface-container flex items-center justify-center border border-white/10 flex-shrink-0">
+        <span class="material-symbols-outlined text-[24px] text-on-surface" id="kpiMarginIcon">account_balance_wallet</span>
+      </div>
+      <div class="flex flex-col">
+        <span class="text-[11px] font-mono text-on-surface-variant uppercase tracking-wider font-semibold">Cumulative Margin</span>
+        <span class="text-2xl font-bold font-mono text-on-surface leading-tight" id="kpiCumulativeMargin">€0</span>
+        <span class="text-[10px] font-mono text-on-surface-variant" id="kpiMarginBreakdown">Rev €0 − Costs €0</span>
+      </div>
+    </div>
+
     <!-- Live KPIs at Minute t -->
     <div class="flex flex-wrap items-center gap-3">
       <!-- Active Transits -->
@@ -287,16 +299,12 @@
 
           <!-- Layer Toggles -->
           <div class="flex flex-wrap items-center gap-1.5 text-xs font-mono">
-            <button type="button" class="px-2.5 py-1 rounded bg-primary text-surface font-bold flex items-center gap-1 transition-all" id="toggleVehiclesBtn" onclick="toggleMapLayer('vehicles')">
+            <button type="button" class="px-2.5 py-1 rounded bg-primary text-surface font-bold flex items-center gap-1 transition-all" id="toggleVehiclesBtn" aria-pressed="true" onclick="toggleMapLayer('vehicles')">
               <span class="material-symbols-outlined text-[14px]">directions_car</span>
               <span>Vehicles</span>
             </button>
-            <button type="button" class="px-2.5 py-1 rounded bg-surface-container hover:bg-surface-container-high text-on-surface flex items-center gap-1 transition-all border border-white/5" id="toggleRoadsBtn" onclick="toggleMapLayer('roads')">
-              <span class="material-symbols-outlined text-[14px] text-primary">route</span>
-              <span>Road Mesh</span>
-            </button>
-            <button type="button" class="px-2.5 py-1 rounded bg-surface-container hover:bg-surface-container-high text-on-surface flex items-center gap-1 transition-all border border-white/5" id="toggleLabelsBtn" onclick="toggleMapLayer('labels')">
-              <span class="material-symbols-outlined text-[14px] text-tertiary">label</span>
+            <button type="button" class="px-2.5 py-1 rounded bg-primary text-surface font-bold flex items-center gap-1 transition-all" id="toggleLabelsBtn" aria-pressed="true" onclick="toggleMapLayer('labels')">
+              <span class="material-symbols-outlined text-[14px]">label</span>
               <span>City Labels</span>
             </button>
           </div>
@@ -310,8 +318,6 @@
 
           <!-- Tactical SVG Vector Map (Alternative View matching Stitch) -->
           <svg id="finlandMapSvg" viewBox="0 0 950 1100" class="w-full h-full hidden" style="background: radial-gradient(#161f33 1px, #0a1327 1px); background-size: 24px 24px;">
-            <!-- Road Base Layer -->
-            <g id="roadsBaseLayer"></g>
             <!-- Tactical Nodes Group -->
             <g id="tacticalNodesGroup"></g>
             <!-- Tactical Moving Vehicles Layer -->
@@ -430,6 +436,8 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <!-- Precompiled default dataset from practice_level_1 -->
   <script src="data/default_dataset.js"></script>
+  <!-- Local Config (API keys, optional) -->
+  <script src="config.js"></script>
   <!-- App Engine Logic -->
   <script src="app.js"></script>
 </body>
