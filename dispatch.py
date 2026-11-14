@@ -44,13 +44,7 @@ class Desk:
         self.booked: set[str] = set()  # the gigs that a driver holds now
         self.posts: dict[str, PostAction] = {}  # gig id -> the post that made it
         self.urgent: set[str] = set()  # the orders whose deadline warning has come
-        self.constants()
-    
-    def constants(self):
-        # Safety
-        # self.
-
-    
+        self._roads: Optional[dict[tuple[str, str], int]] = None  # (from, to) -> driving minutes, loaded lazily
 
     def rejoin(self, snapshot: DeskSnapshot, history: list[DeskEvent]) -> None:
         """Rebuilds what it knows from the world, so a starter that stopped keeps its orders. Then answers
@@ -107,10 +101,59 @@ class Desk:
         if order_id in self.orders:
             self.orders[order_id]["deliveredAt"][leg] = at
 
+    def _road_minutes(self, from_place: str, to_place: str) -> int:
+        """Driving minutes between two places, from the world map (loaded lazily, cached)."""
+        if self._roads is None:
+            world_map = self.world.client.map()
+            self._roads = {(r["from"], r["to"]): int(r["minutes"]) for r in world_map["roads"]}
+        key = (from_place, to_place)
+        if key in self._roads:
+            return self._roads[key]
+        if from_place == to_place:
+            return 25  # within a place: from the map's self-roads (12 km / 25 min)
+        # No road entry: conservative fallback of one hour
+        return 60
+
+    def _safe_deadline(self, request: PriceRequest, option: dict, buffer_minutes: int = 30) -> bool:
+        """Check whether the option's deadline can be met safely: for every leg, the
+        earliest possible pickup (start of the pickup window) plus driving time to the
+        delivery plus a safety buffer must fit before the option's deadline."""
+        for leg in request["legs"]:
+            pickup_from = leg["pickup"]["window"]["from"]
+            travel = self._road_minutes(leg["pickup"]["placeId"], leg["delivery"]["placeId"])
+            if pickup_from + travel + buffer_minutes > option["deadline"]:
+                return False
+        return True
+
+    def _profitable(self, request: PriceRequest, option: dict) -> bool:
+        """Check whether quoting this option at list price covers the estimated driver cost.
+        The base fee is referenceFeeCents (one car per gig); we add a 30% buffer for
+        fee escalation and possible leg splitting, so we only quote when there is a real
+        margin cushion."""
+        legs = max(1, len(request["legs"]))
+        base_fee = request["referenceFeeCents"]  # one fee per gig, roughly independent of leg count
+        estimated_cost = base_fee * 1.3  # 30% buffer for rising/steep fees and splits
+        return option["listPriceCents"] > estimated_cost
+
     def quote(self, request: PriceRequest) -> None:
         self.requests[request["id"]] = request
-        first = request["options"][1]
-        self.outbox.append({"type": "quote", "requestId": request["id"], "prices": {first["kind"]: first["listPriceCents"]}})
+        # Among the options, keep only those that are both safely achievable and profitable.
+        # Quote the single best (highest margin) one; quoting more gives the dealer a choice
+        # that could steer them to a less profitable option.
+        best: Optional[tuple[str, int]] = None  # (option kind, price)
+        for option in request["options"]:
+            if not self._safe_deadline(request, option):
+                continue
+            if not self._profitable(request, option):
+                continue
+            # Margin estimate: list price minus the base driver fee (one reference fee per gig)
+            margin = option["listPriceCents"] - request["referenceFeeCents"]
+            if best is None or margin > best[1]:
+                best = (option["kind"], option["listPriceCents"])
+        if best is None:
+            # No safe and profitable option: better to lose the order than to lose money on it.
+            return
+        self.outbox.append({"type": "quote", "requestId": request["id"], "prices": {best[0]: best[1]}})
 
     def win(self, order: Order) -> None:
         if order["id"] in self.requests and order["id"] not in self.orders:  # rejoin can know it already
