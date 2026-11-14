@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import math
 import re
 import sys
 import time
@@ -14,14 +15,14 @@ from typing import NamedTuple, Optional
 
 from spread.client import Client, SpreadError, Unreachable, World
 from spread.types import (
-    Action, ActionResult, Audience, DeskEvent, DeskEventKind, DeskSnapshot, FeeStep, Gig, Note, Order, PostAction, PriceRequest,
-    Score, StopRef, TimeWindow,
+    Action, ActionResult, Audience, DeskEvent, DeskEventKind, DeskSnapshot, DriverProfile, FeeStep, Gig, Note, Order,
+    Place, PostAction, PriceRequest, Score, StopRef, TimeWindow,
 )
 
 HOUR, DAY = 60, 24 * 60
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 # The events that need an answer. Views and account lines arrive with the next event that needs an answer.
-WAKE_ON: list[DeskEventKind] = ["price_request", "order_won", "order_changed", "order_cancelled", "visit_failed", "gig_expired", "deadline_close"]
+WAKE_ON: list[DeskEventKind] = ["price_request", "order_won", "order_changed", "order_cancelled", "visit_failed", "gig_expired", "deadline_close", "offer_answered"]
 
 
 class Retry(NamedTuple):
@@ -33,7 +34,7 @@ class Retry(NamedTuple):
 
 class Desk:
     """What the starter remembers, and its answer to each event. The answers wait in the outbox
-    until the starter sends them, and the world applies them at the current minute."""
+    until the starter last sent, and the world applies them at the current minute."""
 
     def __init__(self, world: World, level: int, now: int):
         self.world, self.level, self.now = world, level, now
@@ -44,13 +45,19 @@ class Desk:
         self.booked: set[str] = set()  # the gigs that a driver holds now
         self.posts: dict[str, PostAction] = {}  # gig id -> the post that made it
         self.urgent: set[str] = set()  # the orders whose deadline warning has come
+        # Part A state
+        self.cap = 20 if level >= 7 else 10000  # active (undelivered) orders we may hold at once
+        self.dealer_trust: dict[str, int] = {}  # dealerId -> on-time count, 0-25, compounds accepted prices
+        # Part B state
+        self.offers_per_gig: dict[str, int] = {}  # open direct offers per gig (max 3)
+        self.driver_offers_today: dict[str, dict[int, int]] = {}  # driverId -> day -> offers sent today (max 3)
+        self._places: Optional[dict[str, Place]] = None  # place id -> place, cached from the map
         self.constants()
-    
+
     def constants(self):
         # Safety
         # self.
-
-    
+        pass
 
     def rejoin(self, snapshot: DeskSnapshot, history: list[DeskEvent]) -> None:
         """Rebuilds what it knows from the world, so a starter that stopped keeps its orders. Then answers
@@ -94,7 +101,9 @@ class Desk:
         elif event["kind"] == "gig_expired":
             self.repost(event["gigId"])
         elif event["kind"] == "deadline_close":  # it comes again when a driver drops the car after the first warning
-            self.raise_fees(event["orderId"])
+            self.deadline_close(event["orderId"])
+        elif event["kind"] == "offer_answered":
+            self.offer_answered(event)
         elif event["kind"] == "gig_booked":
             self.booked.add(event["gigId"])
         elif event["kind"] in ("gig_dropped", "no_show"):  # after a no-show the gig is open again; a late driver still comes
@@ -106,11 +115,49 @@ class Desk:
         self.leg_gigs.get(order_id, {}).pop(leg, None)
         if order_id in self.orders:
             self.orders[order_id]["deliveredAt"][leg] = at
+            if all(d is not None for d in self.orders[order_id]["deliveredAt"]):
+                order = self.orders[order_id]
+                on_time = max(order["deliveredAt"]) <= order["deadline"]
+                dealer = order["dealerId"]
+                trust = self.dealer_trust.get(dealer, 0)
+                if on_time:
+                    self.dealer_trust[dealer] = min(25, trust + 1)  # on time -> accepted prices +1%, cap 25
+                else:
+                    self.dealer_trust[dealer] = trust // 2  # late -> halves the dealer's count
+
+    def active_orders(self) -> list[Order]:
+        """Won orders that still have at least one undelivered leg: the load the drivers carry now."""
+        return [o for o in self.orders.values() if undelivered(o)]
+
+    def order_cap(self) -> int:
+        """How many orders we may hold undelivered at once. Shortage levels (7–8) cannot move many."""
+        return self.cap
+
+    def _should_bid(self, request: PriceRequest) -> bool:
+        """Decide whether to quote this request. Decline when we already hold too many undelivered
+        orders, so we never fall under the 90% on-time minimum at shortage levels."""
+        if len(self.active_orders()) >= self.order_cap():
+            return False
+        return True
+
+    def _quote_price(self, price: int, dealer_id: str) -> int:
+        """Quote a price for a dealer. A small base markup (level 8's competitor prices run 26–54% above
+        list, so there is headroom) plus the trust earned by delivering to the dealer on time: each
+        on-time order raises accepted prices by 1%, capped at 25% (min(trust, 25))."""
+        trust = min(25, self.dealer_trust.get(dealer_id, 0))
+        return int(price * (1 + 0.08 + trust / 100) + 0.5)
 
     def quote(self, request: PriceRequest) -> None:
         self.requests[request["id"]] = request
-        first = request["options"][1]
-        self.outbox.append({"type": "quote", "requestId": request["id"], "prices": {first["kind"]: first["listPriceCents"]}})
+        if not self._should_bid(request):
+            return
+        options = sorted(request["options"], key=lambda o: o["deadline"])
+        # Prefer the option with the latest deadline (next_day / within_3_days over same_day): less
+        # driver pressure at shortage levels, easier to keep the 90% on-time minimum.
+        chosen = options[-1]
+        markup = 1.2 if chosen["kind"] == "same_day" else 1.0  # same_day only when nothing later exists
+        price = self._quote_price(int(chosen["listPriceCents"] * markup), request["dealerId"])
+        self.outbox.append({"type": "quote", "requestId": request["id"], "prices": {chosen["kind"]: price}})
 
     def win(self, order: Order) -> None:
         if order["id"] in self.requests and order["id"] not in self.orders:  # rejoin can know it already
@@ -154,6 +201,91 @@ class Desk:
         fee = self.requests[order["id"]]["referenceFeeCents"] * cars / len(order["legs"])
         return steep(self.now, fee, self.level) if order["id"] in self.urgent else rising(self.now, fee, self.level)
 
+    def deadline_close(self, order_id: str) -> None:
+        """No driver 3h before lastPickupAt: raise the fee and send direct offers to drivers near the pickup."""
+        self.raise_fees(order_id)
+        self.offer_nearby_drivers(order_id)
+
+    def places(self) -> dict[str, Place]:
+        """The map's places, cached (place id -> place). Costs no token."""
+        if self._places is None:
+            self._places = {place["id"]: place for place in self.world.client.map()["places"]}
+        return self._places
+
+    def offer_nearby_drivers(self, order_id: str) -> None:
+        """Send direct offers to nearby drivers for an unbooked gig of the order, respecting the per-gig
+        (max 3) and per-driver-per-day (max 3) limits."""
+        order = self.orders.get(order_id)
+        if order is None:
+            return
+        gig_id = None
+        for g in self.gigs_of(order_id):
+            if g not in self.booked:
+                gig_id = g
+                break
+        if gig_id is None:
+            return
+        if self.offers_per_gig.get(gig_id, 0) >= 3:
+            return
+        action = self.posts.get(gig_id)
+        if action is None:
+            return
+        cars = pickups(action)
+        fee = self.requests[order_id]["referenceFeeCents"] * cars / len(order["legs"])
+        offer_fee = max(1, int(fee * 2.0 + 0.5))  # steep offer fee to entice a driver right now
+        pickup_place = None
+        for leg in undelivered(order):
+            pickup_place = order["legs"][leg]["pickup"]["placeId"]
+            break
+        if pickup_place is None:
+            return
+        now_day = self.now // DAY
+        candidates: list[tuple[float, str]] = []
+        for driver in self.world.roster():
+            home = driver.get("homePlaceId")
+            if not home or home not in self.places():
+                continue
+            if self.driver_offers_today.get(driver["id"], {}).get(now_day, 0) >= 3:
+                continue
+            candidates.append((self._straight_minutes(home, pickup_place), driver["id"]))
+        candidates.sort()
+        for _, driver_id in candidates[:3]:
+            if self.offers_per_gig.get(gig_id, 0) >= 3:
+                break
+            day_counts = self.driver_offers_today.setdefault(driver_id, {})
+            day_counts[now_day] = day_counts.get(now_day, 0) + 1
+            self.offers_per_gig[gig_id] = self.offers_per_gig.get(gig_id, 0) + 1
+            self.outbox.append({"type": "offer", "gigId": gig_id, "driverId": driver_id, "feeCents": offer_fee})
+
+    def offer_answered(self, event: DeskEvent) -> None:
+        """React to a direct offer's answer. Accepted -> the gig is booked. Declined/expired -> offer
+        another driver for the same order, within the limits."""
+        gig_id = event["gigId"]
+        answer = event["answer"]
+        if gig_id in self.offers_per_gig:
+            self.offers_per_gig[gig_id] = max(0, self.offers_per_gig[gig_id] - 1)
+        if answer == "accepted":
+            self.booked.add(gig_id)
+            return
+        order_id = None
+        for oid, legs in self.leg_gigs.items():
+            if gig_id in legs.values():
+                order_id = oid
+                break
+        if order_id is not None and answer in ("declined", "expired"):
+            self.offer_nearby_drivers(order_id)
+
+    def _straight_minutes(self, a: str, b: str) -> float:
+        """Approximate driving minutes between two places from lat/lon (roughly 1 km per minute)."""
+        places = self.places()
+        pa, pb = places.get(a), places.get(b)
+        if pa is None or pb is None:
+            return float("inf")
+        lat = math.radians((pa["lat"] + pb["lat"]) / 2)
+        dx = (pb["lon"] - pa["lon"]) * 111 * math.cos(lat)
+        dy = (pb["lat"] - pa["lat"]) * 111
+        return (dx * dx + dy * dy) ** 0.5
+
     def retry(self, order_id: str, leg: int, reason: str) -> None:
         if order_id in self.orders:
             order = self.orders[order_id]
@@ -186,7 +318,7 @@ class Desk:
         self.posts[gig_id] = action
 
     def withdraw(self, order_id: str) -> bool:
-        """Takes an order's gigs out of the drivers' app. False, and nothing withdrawn, when a driver holds one of them."""
+        """Takes an order's gigs out of the app. False, and nothing withdrawn, when a driver holds one of them."""
         self.send_post_of(order_id)
         gigs = self.gigs_of(order_id)
         if any(gig_id in self.booked for gig_id in gigs):
