@@ -25,7 +25,7 @@ WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", 
 # fees and (optionally) direct offers, so drivers have time to see the gig and reach it.
 DEADLINE_EARLY_MINUTES = 7 * HOUR
 # The events that need an answer. Views and account lines arrive with the next event that needs an answer.
-WAKE_ON: list[DeskEventKind] = ["price_request", "order_won", "order_changed", "order_cancelled", "visit_failed", "gig_expired", "deadline_close"]
+WAKE_ON: list[DeskEventKind] = ["price_request", "order_won", "order_lost", "order_changed", "order_cancelled", "visit_failed", "gig_expired", "deadline_close"]
 
 LARGE_QUOTE= 1000000000000000
 
@@ -94,6 +94,8 @@ class Desk:
             self.quote(event["request"])
         elif event["kind"] == "order_won":
             self.win(event["order"])
+        elif event["kind"] == "order_lost":  # the dealer bought from the competitor
+            self.lost(event.get("requestId", ""))
         elif event["kind"] == "order_changed":
             self.change(event["order"])
         elif event["kind"] == "order_cancelled":  # the world has stopped the car and told each of its gigs what happens
@@ -116,6 +118,41 @@ class Desk:
         self.leg_gigs.get(order_id, {}).pop(leg, None)
         if order_id in self.orders:
             self.orders[order_id]["deliveredAt"][leg] = at
+            # When the last leg lands, record whether the dealer got the order on time (level 8 trust).
+            if self._order_done(order_id):
+                self._record_dealer_outcome(order_id)
+
+    def _order_done(self, order_id: str) -> bool:
+        """True when every leg of the order has been delivered."""
+        order = self.orders.get(order_id)
+        if order is None:
+            return False
+        return all(at is not None for at in order["deliveredAt"])
+
+    def _record_dealer_outcome(self, order_id: str) -> None:
+        """Mark a fully delivered order as on time or late for its dealer (level 8 trust)."""
+        order = self.orders.get(order_id)
+        if order is None:
+            return
+        dealer = self.requests[order_id]["dealerId"] if order_id in self.requests else None
+        if dealer is None:
+            return
+        stats = self.dealer_stats.setdefault(dealer, {"won": 0, "lost": 0, "on_time": 0, "late": 0})
+        deadline = order["deadline"]
+        on_time = all(at <= deadline for at in order["deliveredAt"])
+        if on_time:
+            stats["on_time"] += 1
+        else:
+            stats["late"] += 1
+
+    def lost(self, request_id: str) -> None:
+        """The dealer bought from the competitor; remember it for dealer trust pricing."""
+        request = self.requests.get(request_id)
+        if request is None:
+            return
+        dealer = request["dealerId"]
+        stats = self.dealer_stats.setdefault(dealer, {"won": 0, "lost": 0, "on_time": 0, "late": 0})
+        stats["lost"] += 1
 
     def _road_minutes(self, from_place: str, to_place: str) -> int:
         """Driving minutes between two places, from the world map (loaded lazily, cached)."""
@@ -200,6 +237,9 @@ class Desk:
     def win(self, order: Order) -> None:
         if order["id"] in self.requests and order["id"] not in self.orders:  # rejoin can know it already
             self.orders[order["id"]] = order
+            dealer = order.get("dealerId") or self.requests[order["id"]]["dealerId"]
+            stats = self.dealer_stats.setdefault(dealer, {"won": 0, "lost": 0, "on_time": 0, "late": 0})
+            stats["won"] += 1
             self.post(order, undelivered(order))
             self.maybe_raise_early(order["id"])
 
