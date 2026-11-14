@@ -1,12 +1,23 @@
-"""The starter: a whole dispatch system that you can read in five minutes, then change. HANDBOOK.md says
-what it does and how to run it (`spread-starter --help` lists the options).
+"""Attempt two: the Spread starter with dynamic, day-aware pricing and conservative order selection.
 
-To change it, copy this file and run the copy: python dispatch.py
+Part A (quote): never quote an option the driver cannot reach before its deadline
+(slack-based no-bid), skip risky notes at shortage levels, skip next-day options with
+very early deadlines (overnight driving is unreliable), quote list price x a dynamic
+multiplier (base per-level + market_pressure that rises after a sub-90% on-time day
+and falls after a >93% on-time day), and add the level-8 dealer trust bump.
+
+Part B (dispatch): opening-fee multiple driven by gig expiry vs quick booking
+(fading mean, re-tuned per day), steep fees once the deadline warning comes or
+the last pickup is approaching, and the usual retry / re-post handling.
+
+Order selection is conservative: we only bid when list price covers the driver cost
+with margin, and we tighten further whenever the previous day's on-time share drops
+below 90%. A small margin with high on-time is acceptable — ≥90% on-time is the hard
+constraint that determines ranking.
 """
 from __future__ import annotations
 
 import argparse
-import contextlib
 import re
 import sys
 import time
@@ -20,29 +31,30 @@ from spread.types import (
 
 HOUR, DAY = 60, 24 * 60
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-# Part B: start reacting before the server's deadline_close (3 h before lastPickupAt).
-# Once the last pickup is within this many minutes, treat the order as urgent: steep
-# fees and (optionally) direct offers, so drivers have time to see the gig and reach it.
+
+# Part B: react before the server's deadline_close (3 h before lastPickupAt). Once
+# the last pickup is within this many minutes, treat the order as urgent: steep
+# fees so drivers see the gig and reach it in time.
 DEADLINE_EARLY_MINUTES = 7 * HOUR
-# Opening fee as a multiple of the reference (typical) fee per car.
-# Levels 1-6 have enough drivers at the typical fee. Levels 7-8 are driver
-# shortages: opening higher gets a driver in the first minutes instead of waiting
-# for the deadline warning, which protects both the on-time share and the margin.
-OPENING_FEE = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0, 6: 1.0, 7: 1.4, 8: 1.5}
-# The most we will ever pay a driver, as a multiple of the reference fee. Paying
-# more than the order's revenue (>= 2x reference at shortage levels) loses money
-# on every car, so the emergency curve stops here.
+# Opening fee as a multiple of the reference fee per car. Levels 1-6 have enough
+# drivers at the typical fee. Levels 7-8 are driver shortages: opening higher gets
+# a driver in the first minutes instead of waiting for the deadline warning.
+OPENING_FEE = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0, 6: 1.0, 7: 1.4, 8: 1.3}
+# The most we will ever pay a driver, as a multiple of the reference fee.
 MAX_FEE_MULTIPLE = {7: 2.0, 8: 2.2}
 # Part A: list price must cover this multiple of the reference fee for us to bid.
-PRICE_MULTIPLIER = {1: 1.2, 2: 1.2, 3: 1.2, 4: 1.5, 5: 1.5, 6: 1.5, 7: 2.0, 8: 2.0}
-# Part A: safety buffer (minutes) added to drive time when checking deadline slack,
-# per level (tighter at shortage levels where a missed pickup is expensive).
-SLACK_BUFFER = {1: 30, 2: 30, 3: 30, 4: 60, 5: 60, 6: 60, 7: 90, 8: 90}
+PRICE_MULTIPLIER = {1: 1.2, 2: 1.2, 3: 1.2, 4: 1.5, 5: 1.5, 6: 1.5, 7: 2.0, 8: 1.7}
+# Part A: safety buffer (minutes) added to drive time when checking deadline slack.
+SLACK_BUFFER = {1: 30, 2: 30, 3: 30, 4: 60, 5: 60, 6: 60, 7: 90, 8: 120}
 # Part B: a gig booked within this many minutes of posting counts as "quick booking",
-# which lowers the opening-fee multiple (ticket 06).
+# which lowers the opening-fee multiple.
 QUICK_BOOK_MINUTES = 60
-# The events that need an answer. Views and account lines arrive with the next event that needs an answer.
-WAKE_ON: list[DeskEventKind] = ["price_request", "order_won", "order_lost", "order_changed", "order_cancelled", "visit_failed", "gig_expired", "deadline_close"]
+
+# The events that need an answer.
+WAKE_ON: list[DeskEventKind] = [
+    "price_request", "order_won", "order_lost", "order_changed", "order_cancelled",
+    "visit_failed", "gig_expired", "gig_booked", "deadline_close",
+]
 
 RISKY_NOTE_KEYWORDS = [
     # manual gearbox (driver must hold a manual licence)
@@ -53,6 +65,7 @@ RISKY_NOTE_KEYWORDS = [
     "soita", "call before", "ennen kun", "ennen kuin", "private", "yksityinen",
     "closing", "suljettu",
 ]
+
 
 class Retry(NamedTuple):
     """How to post a leg again after a failed visit."""
@@ -75,15 +88,21 @@ class Desk:
         self.posts: dict[str, PostAction] = {}  # gig id -> the post that made it
         self.urgent: set[str] = set()  # the orders whose deadline warning has come
         self._roads: Optional[dict[tuple[str, str], int]] = None  # (from, to) -> driving minutes, loaded lazily
-        self.dealer_stats: dict[str, dict] = {}
         # Part A state: adaptive quote pricing (tickets 03/05) and dealer memory (ticket 04).
         # Keyed by dealerId: {"multiplier": float, "wins": float, "quotes": float,
         # "price_war": bool, "base_rate": float}.
         self.quote_state: dict[str, dict] = {}
+        self.dealer_stats: dict[str, dict] = {}
         # Part B state: adaptive opening-fee multiple (ticket 06).
         self.fee_pressure: float = 0.0  # fading running mean: + on unbooked gig expiry, - on quick booking
         self.gig_posted_at: dict[str, int] = {}  # gigId -> the minute the starter posted the gig
-        self._strategy_day: int = self.now // DAY  # day of the last per-day re-tune 
+        self._strategy_day: int = self.now // DAY  # day of the last per-day re-tune
+        # Day-level dynamics: track wins/losses/on-time per day and adjust aggressiveness.
+        self.day_stats: dict[int, dict] = {}  # day -> {"wins": int, "losses": int, "on_time": int, "late": int}
+        self.market_pressure: float = 0.0  # + = more expensive & selective; - = more aggressive
+        self._last_completed_day: Optional[int] = None  # day whose stats are finalised
+
+    # ---------------------------------------------------------------- rebuild
 
     def rejoin(self, snapshot: DeskSnapshot, history: list[DeskEvent]) -> None:
         """Rebuilds what it knows from the world, so a starter that stopped keeps its orders. Then answers
@@ -113,32 +132,35 @@ class Desk:
         for request in snapshot["openRequests"]:
             self.quote(request)
 
+    # ---------------------------------------------------------------- events
+
     def handle(self, event: DeskEvent) -> None:
         self._tune_day()
-        if event["kind"] == "price_request":
+        kind = event["kind"]
+        if kind == "price_request":
             self.quote(event["request"])
-        elif event["kind"] == "order_won":
+        elif kind == "order_won":
             self.win(event["order"])
-        elif event["kind"] == "order_lost":  # the dealer bought from the competitor
+        elif kind == "order_lost":  # the dealer bought from the competitor
             self.lost(event.get("requestId", ""))
-        elif event["kind"] == "order_changed":
+        elif kind == "order_changed":
             self.change(event["order"])
-        elif event["kind"] == "order_cancelled":  # the world has stopped the car and told each of its gigs what happens
+        elif kind == "order_cancelled":  # the world has stopped the car and told each of its gigs what happens
             for books in (self.orders, self.leg_gigs):
                 books.pop(event["orderId"], None)
-        elif event["kind"] == "visit_failed":
+        elif kind == "visit_failed":
             self.retry(event["orderId"], event["leg"], event["reason"])
-        elif event["kind"] == "gig_expired":
+        elif kind == "gig_expired":
             self.repost(event["gigId"])
             self._gig_expired(event["gigId"])   # Part B (ticket 06): unbooked expiry raises the opening fee
-        elif event["kind"] == "deadline_close":  # it comes again when a driver drops the car after the first warning
+        elif kind == "deadline_close":  # it comes again when a driver drops the car after the first warning
             self.raise_fees(event["orderId"])
-        elif event["kind"] == "gig_booked":
+        elif kind == "gig_booked":
             self.booked.add(event["gigId"])
             self._gig_booked_quick(event["gigId"])  # Part B (ticket 06): quick booking lowers the opening fee
-        elif event["kind"] in ("gig_dropped", "no_show"):  # after a no-show the gig is open again; a late driver still comes
+        elif kind in ("gig_dropped", "no_show"):  # after a no-show the gig is open again; a late driver still comes
             self.booked.discard(event["gigId"])
-        elif event["kind"] == "delivered":
+        elif kind == "delivered":
             self.delivered(event["orderId"], event["leg"], event["at"])
 
     def delivered(self, order_id: str, leg: int, at: int) -> None:
@@ -156,6 +178,22 @@ class Desk:
             return False
         return all(at is not None for at in order["deliveredAt"])
 
+    def _day(self) -> int:
+        return self.now // DAY
+
+    def _record_day_outcome(self, on_time: bool | None = None, won: bool = False, lost: bool = False) -> None:
+        """Accumulate per-day stats used to adjust market_pressure at the next day boundary."""
+        day = self._day()
+        stats = self.day_stats.setdefault(day, {"wins": 0, "losses": 0, "on_time": 0, "late": 0})
+        if won:
+            stats["wins"] += 1
+        if lost:
+            stats["losses"] += 1
+        if on_time is True:
+            stats["on_time"] += 1
+        elif on_time is False:
+            stats["late"] += 1
+
     def _record_dealer_outcome(self, order_id: str) -> None:
         """Mark a fully delivered order as on time or late for its dealer (level 8 trust)."""
         order = self.orders.get(order_id)
@@ -171,6 +209,7 @@ class Desk:
             stats["on_time"] += 1
         else:
             stats["late"] += 1
+        self._record_day_outcome(on_time=on_time)
 
     def lost(self, request_id: str) -> None:
         """The dealer bought from the competitor; remember it for dealer trust pricing."""
@@ -181,6 +220,9 @@ class Desk:
         stats = self.dealer_stats.setdefault(dealer, {"won": 0, "lost": 0, "on_time": 0, "late": 0})
         stats["lost"] += 1
         self._tune_quote(dealer, False)  # Part A: quote win/loss tunes the adaptive multiplier
+        self._record_day_outcome(lost=True)
+
+    # ---------------------------------------------------------------- roads & safety
 
     def _road_minutes(self, from_place: str, to_place: str) -> int:
         """Driving minutes between two places, from the world map (loaded lazily, cached)."""
@@ -208,7 +250,7 @@ class Desk:
 
     def _risky_note(self, request: PriceRequest) -> bool:
         """True when the dealer's note carries a risky keyword (manual gearbox, no plates,
-        call-before-pickup, private slot, closing hours). At shortage levels these are
+        call-before-pickup, private-seller slot, closing hours). At shortage levels these are
         skipped because drivers are scarce and failed visits kill margin."""
         note = request.get("note")
         if not note:
@@ -221,17 +263,22 @@ class Desk:
         lp = option["listPriceCents"]
 
         # 1. Profitability: list price must cover expected driver cost.
-        #    Observed median fee/referenceFee: ~1.0x (L1-6), ~1.75x (L7-8).
-        if lp < ref * PRICE_MULTIPLIER[self.level]:
+        #    Uses the dynamic multiplier (base per-level + market_pressure), so the
+        #    threshold rises when recent on-time was poor and falls when it was good.
+        if lp < ref * self._dynamic_price_multiplier():
             return False
 
         # 2. Risky notes: manual gearbox, missing plates, call-before-pickup, private-seller slot.
-        #    At shortage levels (7-8) these are too risky; at lower levels accept with caution.
-        #    (Deadline slack is checked separately in quote(): options we cannot reach in time
-        #    are not quoted at all, ticket 02.)
         if self.level >= 7 and self._risky_note(request):
             return False
+
+        # 3. next_day orders with very early deadlines require overnight driving, which is
+        #    unreliable at shortage levels. Skip next_day options due before Wednesday noon.
+        if self.level >= 7 and option["kind"] == "next_day" and option["deadline"] < 3 * DAY + 12 * HOUR:
+            return False
         return True
+
+    # ---------------------------------------------------------------- quote pricing
 
     def _quote_price(self, request: PriceRequest, option: dict, stats: dict, multiplier: float) -> int:
         price = option["listPriceCents"]
@@ -249,10 +296,16 @@ class Desk:
     def _tune_day(self) -> None:
         """Per-day re-tune with a fading running mean (D6). At the first event of each new day
         the running means fade toward neutral and the price-war flag resets, so normal tuning
-        resumes the day after a suspected price war."""
+        resumes the day after a suspected price war. Also adjusts market_pressure from the
+        previous day's on-time share: below 90% we become more expensive & selective; above
+        95% we can relax slightly."""
         day = self.now // DAY
         if day == self._strategy_day:
             return
+        # Finalise the previous day's stats before starting the new day.
+        prev_day = day - 1
+        if self._last_completed_day is None or prev_day > self._last_completed_day:
+            self._finalise_day(prev_day)
         self._strategy_day = day
         fade = 0.5
         for qst in self.quote_state.values():
@@ -260,6 +313,34 @@ class Desk:
             qst["quotes"] = max(qst["quotes"] * fade, 1e-9)
             qst["price_war"] = False
         self.fee_pressure *= fade
+        # Market pressure fades more slowly so a bad day keeps us conservative longer.
+        self.market_pressure *= 0.7
+
+    def _finalise_day(self, day: int) -> None:
+        """Compute the previous day's on-time share and adjust market_pressure."""
+        stats = self.day_stats.get(day)
+        if not stats:
+            self._last_completed_day = day
+            return
+        total = stats["on_time"] + stats["late"]
+        if total == 0:
+            self._last_completed_day = day
+            return
+        on_time_share = stats["on_time"] / total
+        # Below the 90% hard constraint: become more expensive & selective.
+        if on_time_share < 0.90:
+            self.market_pressure = min(self.market_pressure + 0.25, 1.0)
+        # Well above 90%: relax to win more volume (dilutes late-order impact).
+        elif on_time_share > 0.96:
+            self.market_pressure = max(self.market_pressure - 0.20, -0.5)
+        # Comfortably above 90%: small relaxation.
+        elif on_time_share > 0.93:
+            self.market_pressure = max(self.market_pressure - 0.10, -0.5)
+        # Loss streak (dealer went to competitor more than we won): our quotes may be
+        # too high relative to the market; nudge pressure down a touch.
+        if stats["losses"] > stats["wins"] and stats["losses"] >= 3:
+            self.market_pressure = max(self.market_pressure - 0.05, -0.5)
+        self._last_completed_day = day
 
     def _tune_quote(self, dealer: str, won: bool) -> None:
         """Update the dealer's quote win/loss running mean and adapt the multiplier (tickets 03/05).
@@ -281,10 +362,24 @@ class Desk:
             qst["multiplier"] = max(qst["multiplier"], 1.15)
         elif rate >= 0.70:
             # Ticket 03: high win rate - nudge the multiplier up to capture more margin.
-            qst["multiplier"] = min(qst["multiplier"] + 0.05, 1.25)
+            qst["multiplier"] = min(qst["multiplier"] + 0.05, 1.50)
         # Low win rate: hold the multiplier and keep bidding - never walk away from this lever.
         qst["multiplier"] = max(qst["multiplier"], 1.0)
         qst["base_rate"] = 0.85 * base + 0.15 * rate
+
+    def _dynamic_price_multiplier(self) -> float:
+        """Base per-level multiplier shifted by market_pressure. Higher pressure = more
+        conservative (higher price threshold, fewer bids) to protect on-time share."""
+        base = PRICE_MULTIPLIER.get(self.level, 1.5)
+        mult = base + self.market_pressure
+        return min(max(mult, 1.0), 2.5)
+
+    def _dynamic_opening_fee(self) -> float:
+        """Base per-level opening fee shifted by market_pressure. Higher pressure = higher
+        opening fee to attract drivers immediately on conservative lanes."""
+        base = OPENING_FEE.get(self.level, 1.0)
+        mult = base + self.market_pressure * 0.15
+        return min(max(mult, base), MAX_FEE_MULTIPLE.get(self.level, 2.5))
 
     def quote(self, request: PriceRequest) -> None:
         self.requests[request["id"]] = request
@@ -306,6 +401,8 @@ class Desk:
             self.outbox.append({"type": "quote", "requestId": request["id"], "prices": prices})
         # Decline silently otherwise: we never send a quote for an option we will not bid on.
 
+    # ---------------------------------------------------------------- dispatch
+
     def win(self, order: Order) -> None:
         if order["id"] in self.requests and order["id"] not in self.orders:  # rejoin can know it already
             self.orders[order["id"]] = order
@@ -315,6 +412,7 @@ class Desk:
             self._tune_quote(dealer, True)  # Part A: quote win/loss tunes the adaptive multiplier
             self.post(order, undelivered(order))
             self.maybe_raise_early(order["id"])
+            self._record_day_outcome(won=True)
 
     def change(self, order: Order) -> None:
         if order["id"] in self.orders:
@@ -373,7 +471,7 @@ class Desk:
         # Part B (ticket 06): adaptive opening-fee multiple - rises on unbooked gig expiry
         # and falls on quick booking via a fading running mean, re-tuned per day. Never below
         # the level's base opening fee and never above MAX_FEE_MULTIPLE.
-        level_multiple = OPENING_FEE.get(self.level, 1.0)
+        level_multiple = self._dynamic_opening_fee()
         multiple = min(max(level_multiple + self.fee_pressure * 0.1, level_multiple), MAX_FEE_MULTIPLE.get(self.level, 2.5))
         opening = base * multiple
         schedule = steep(self.now, base, self.level) if urgent else rising(self.now, opening, self.level)
