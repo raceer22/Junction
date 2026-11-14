@@ -24,10 +24,25 @@ WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", 
 # Once the last pickup is within this many minutes, treat the order as urgent: steep
 # fees and (optionally) direct offers, so drivers have time to see the gig and reach it.
 DEADLINE_EARLY_MINUTES = 7 * HOUR
+# Opening fee as a multiple of the reference (typical) fee per car.
+# Levels 1-6 have enough drivers at the typical fee. Levels 7-8 are driver
+# shortages: opening higher gets a driver in the first minutes instead of waiting
+# for the deadline warning, which protects both the on-time share and the margin.
+OPENING_FEE = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0, 6: 1.0, 7: 1.4, 8: 1.5}
+# The most we will ever pay a driver, as a multiple of the reference fee. Paying
+# more than the order's revenue (>= 2x reference at shortage levels) loses money
+# on every car, so the emergency curve stops here.
+MAX_FEE_MULTIPLE = {7: 2.0, 8: 2.2}
+# Part A: list price must cover this multiple of the reference fee for us to bid.
+PRICE_MULTIPLIER = {1: 1.2, 2: 1.2, 3: 1.2, 4: 1.5, 5: 1.5, 6: 1.5, 7: 2.0, 8: 2.0}
+# Part A: safety buffer (minutes) added to drive time when checking deadline slack,
+# per level (tighter at shortage levels where a missed pickup is expensive).
+SLACK_BUFFER = {1: 30, 2: 30, 3: 30, 4: 60, 5: 60, 6: 60, 7: 90, 8: 90}
+# Part B: a gig booked within this many minutes of posting counts as "quick booking",
+# which lowers the opening-fee multiple (ticket 06).
+QUICK_BOOK_MINUTES = 60
 # The events that need an answer. Views and account lines arrive with the next event that needs an answer.
 WAKE_ON: list[DeskEventKind] = ["price_request", "order_won", "order_lost", "order_changed", "order_cancelled", "visit_failed", "gig_expired", "deadline_close"]
-
-LARGE_QUOTE= 1000000000000000
 
 RISKY_NOTE_KEYWORDS = [
     # manual gearbox (driver must hold a manual licence)
@@ -60,7 +75,15 @@ class Desk:
         self.posts: dict[str, PostAction] = {}  # gig id -> the post that made it
         self.urgent: set[str] = set()  # the orders whose deadline warning has come
         self._roads: Optional[dict[tuple[str, str], int]] = None  # (from, to) -> driving minutes, loaded lazily
-        self.dealer_stats: dict[str, dict] = {} 
+        self.dealer_stats: dict[str, dict] = {}
+        # Part A state: adaptive quote pricing (tickets 03/05) and dealer memory (ticket 04).
+        # Keyed by dealerId: {"multiplier": float, "wins": float, "quotes": float,
+        # "price_war": bool, "base_rate": float}.
+        self.quote_state: dict[str, dict] = {}
+        # Part B state: adaptive opening-fee multiple (ticket 06).
+        self.fee_pressure: float = 0.0  # fading running mean: + on unbooked gig expiry, - on quick booking
+        self.gig_posted_at: dict[str, int] = {}  # gigId -> the minute the starter posted the gig
+        self._strategy_day: int = self.now // DAY  # day of the last per-day re-tune 
 
     def rejoin(self, snapshot: DeskSnapshot, history: list[DeskEvent]) -> None:
         """Rebuilds what it knows from the world, so a starter that stopped keeps its orders. Then answers
@@ -72,6 +95,7 @@ class Desk:
             posted.setdefault(gig["stops"][0]["orderId"], []).append(gig)
             if gig["status"] in ("open", "booked", "working"):
                 self.carry({"type": "post", "stops": gig["stops"], "audience": gig["audience"], "schedule": gig["schedule"]}, gig["id"])
+                self.gig_posted_at[gig["id"]] = gig["postedAt"]  # Part B (ticket 06)
         self.requests = {e["request"]["id"]: e["request"] for e in history if e["kind"] == "price_request"}
         self.urgent = {e["orderId"] for e in history if e["kind"] == "deadline_close"}
         self.orders = {o["id"]: o for o in snapshot["orders"] if o["id"] in self.requests and o["status"] != "cancelled"}
@@ -90,6 +114,7 @@ class Desk:
             self.quote(request)
 
     def handle(self, event: DeskEvent) -> None:
+        self._tune_day()
         if event["kind"] == "price_request":
             self.quote(event["request"])
         elif event["kind"] == "order_won":
@@ -105,10 +130,12 @@ class Desk:
             self.retry(event["orderId"], event["leg"], event["reason"])
         elif event["kind"] == "gig_expired":
             self.repost(event["gigId"])
+            self._gig_expired(event["gigId"])   # Part B (ticket 06): unbooked expiry raises the opening fee
         elif event["kind"] == "deadline_close":  # it comes again when a driver drops the car after the first warning
             self.raise_fees(event["orderId"])
         elif event["kind"] == "gig_booked":
             self.booked.add(event["gigId"])
+            self._gig_booked_quick(event["gigId"])  # Part B (ticket 06): quick booking lowers the opening fee
         elif event["kind"] in ("gig_dropped", "no_show"):  # after a no-show the gig is open again; a late driver still comes
             self.booked.discard(event["gigId"])
         elif event["kind"] == "delivered":
@@ -153,6 +180,7 @@ class Desk:
         dealer = request["dealerId"]
         stats = self.dealer_stats.setdefault(dealer, {"won": 0, "lost": 0, "on_time": 0, "late": 0})
         stats["lost"] += 1
+        self._tune_quote(dealer, False)  # Part A: quote win/loss tunes the adaptive multiplier
 
     def _road_minutes(self, from_place: str, to_place: str) -> int:
         """Driving minutes between two places, from the world map (loaded lazily, cached)."""
@@ -182,8 +210,10 @@ class Desk:
         """True when the dealer's note carries a risky keyword (manual gearbox, no plates,
         call-before-pickup, private slot, closing hours). At shortage levels these are
         skipped because drivers are scarce and failed visits kill margin."""
-        note = (request.get("note") or "")
-        text = note.lower()
+        note = request.get("note")
+        if not note:
+            return False
+        text = (note.get("text") or "").lower()
         return any(kw in text for kw in RISKY_NOTE_KEYWORDS)
 
     def _should_bid(self, request: PriceRequest, option: dict) -> bool:
@@ -192,47 +222,89 @@ class Desk:
 
         # 1. Profitability: list price must cover expected driver cost.
         #    Observed median fee/referenceFee: ~1.0x (L1-6), ~1.75x (L7-8).
-        price_multiplier = {1: 1.2, 2: 1.2, 3: 1.2, 4: 1.5, 5: 1.5, 6: 1.5, 7: 2.0, 8: 2.0}[self.level]
-        buffer_multiplier = {1: 30, 2: 30, 3: 30, 4: 60, 5: 60, 6: 60, 7: 90, 8: 90}[self.level]
-        if lp < ref * price_multiplier:
+        if lp < ref * PRICE_MULTIPLIER[self.level]:
             return False
 
-        # 2. Deadline slack: enough time from now to drive there with a level-based buffer.
-        if not self._safe_deadline(request, option, buffer_minutes=buffer_multiplier):
-            return False
-
-        # 3. Risky notes: manual gearbox, missing plates, call-before-pickup, private-seller slot.
+        # 2. Risky notes: manual gearbox, missing plates, call-before-pickup, private-seller slot.
         #    At shortage levels (7-8) these are too risky; at lower levels accept with caution.
+        #    (Deadline slack is checked separately in quote(): options we cannot reach in time
+        #    are not quoted at all, ticket 02.)
         if self.level >= 7 and self._risky_note(request):
             return False
         return True
 
-    def _quote_price(self, request: PriceRequest, option: dict, stats: dict) -> int:
+    def _quote_price(self, request: PriceRequest, option: dict, stats: dict, multiplier: float) -> int:
         price = option["listPriceCents"]
         if self.level >= 8:
-            # Dealer trust: each on-time delivery raises accepted prices by 1% (cap 25%).
-            # Be conservative: take half the trust as extra margin.
+            # Dealer trust (D7): each fully delivered on-time order raises that dealer's
+            # accepted-price bump by +1%, capped at 25%, applied to quotes at level 8.
             trust = min(stats["on_time"], 25)
-            price = int(price * (1 + trust / 200) + 0.5)  # +0.5 = round half up
-        # Levels 1-7: quote at list price (competitor is at or above list; L1-3 no competitor).
+            price = int(price * (1 + trust / 100) + 0.5)  # +0.5 = round half up
+        # Part A (ticket 03): quote = list price x the per-dealer adaptive multiplier,
+        # always whole cents and at or above list price when the multiplier is >= 1.
+        price = int(price * multiplier + 0.5)
+        # Levels 1-7: quote at list price x multiplier (competitor is at or above list; L1-3 no competitor).
         return max(1, price)
+
+    def _tune_day(self) -> None:
+        """Per-day re-tune with a fading running mean (D6). At the first event of each new day
+        the running means fade toward neutral and the price-war flag resets, so normal tuning
+        resumes the day after a suspected price war."""
+        day = self.now // DAY
+        if day == self._strategy_day:
+            return
+        self._strategy_day = day
+        fade = 0.5
+        for qst in self.quote_state.values():
+            qst["wins"] *= fade
+            qst["quotes"] = max(qst["quotes"] * fade, 1e-9)
+            qst["price_war"] = False
+        self.fee_pressure *= fade
+
+    def _tune_quote(self, dealer: str, won: bool) -> None:
+        """Update the dealer's quote win/loss running mean and adapt the multiplier (tickets 03/05).
+        The multiplier only ever nudges up or holds at or above 1: when the win rate is high it
+        nudges up to capture more margin; when it collapses (suspected price-war day) it steps
+        back to avoid below-cost wins that day. It never declines offers because of this lever."""
+        qst = self.quote_state.setdefault(dealer, {"multiplier": 1.0, "wins": 0.0, "quotes": 0.0, "price_war": False, "base_rate": 0.5})
+        qst["quotes"] += 1.0
+        if won:
+            qst["wins"] += 1.0
+        quotes = qst["quotes"]
+        rate = qst["wins"] / quotes if quotes > 0 else 0.5
+        base = qst["base_rate"]
+        # Ticket 05: a sudden win-rate collapse flags a suspected price-war day.
+        if quotes >= 4 and rate < 0.40 and rate < base * 0.70:
+            qst["price_war"] = True
+        if qst["price_war"]:
+            # Step back: quote higher on a price-war day so we avoid below-cost wins.
+            qst["multiplier"] = max(qst["multiplier"], 1.15)
+        elif rate >= 0.70:
+            # Ticket 03: high win rate - nudge the multiplier up to capture more margin.
+            qst["multiplier"] = min(qst["multiplier"] + 0.05, 1.25)
+        # Low win rate: hold the multiplier and keep bidding - never walk away from this lever.
+        qst["multiplier"] = max(qst["multiplier"], 1.0)
+        qst["base_rate"] = 0.85 * base + 0.15 * rate
 
     def quote(self, request: PriceRequest) -> None:
         self.requests[request["id"]] = request
+        self._tune_day()
         dealer = request["dealerId"]
         stats = self.dealer_stats.setdefault(dealer, {"won": 0, "lost": 0, "on_time": 0, "late": 0})
+        qst = self.quote_state.setdefault(dealer, {"multiplier": 1.0, "wins": 0.0, "quotes": 0.0, "price_war": False, "base_rate": 0.5})
+        multiplier = qst["multiplier"]
         prices: dict[str, int] = {}
         for option in request["options"]:
+            # Ticket 02 (Part A): never quote an option whose pickup cannot be reached before its
+            # deadline with adequate slack - no losing quote is sent for unreachable pickups.
+            if not self._safe_deadline(request, option, buffer_minutes=SLACK_BUFFER[self.level]):
+                continue
             if not self._should_bid(request, option):
                 continue
-            prices[option["kind"]] = self._quote_price(request, option, stats)
-        if not prices:
-            # Decline: quote far above list on the first option (a losing quote costs nothing;
-            # not quoting at all costs dealer goodwill).
-            first = request["options"][0] if request["options"] else None
-            if first is not None:
-                prices[first["kind"]] = LARGE_QUOTE
-        self.outbox.append({"type": "quote", "requestId": request["id"], "prices": prices})
+            prices[option["kind"]] = self._quote_price(request, option, stats, multiplier)
+        if prices:
+            self.outbox.append({"type": "quote", "requestId": request["id"], "prices": prices})
+        # Decline silently otherwise: we never send a quote for an option we will not bid on.
 
     def win(self, order: Order) -> None:
         if order["id"] in self.requests and order["id"] not in self.orders:  # rejoin can know it already
@@ -240,6 +312,7 @@ class Desk:
             dealer = order.get("dealerId") or self.requests[order["id"]]["dealerId"]
             stats = self.dealer_stats.setdefault(dealer, {"won": 0, "lost": 0, "on_time": 0, "late": 0})
             stats["won"] += 1
+            self._tune_quote(dealer, True)  # Part A: quote win/loss tunes the adaptive multiplier
             self.post(order, undelivered(order))
             self.maybe_raise_early(order["id"])
 
@@ -294,9 +367,32 @@ class Desk:
     def fees_for(self, order: Order, cars: int) -> list[FeeStep]:
         """The fees for some of the order's cars from now: rising, or steep once its
         deadline warning has come, or we judge the deadline is close enough."""
-        fee = self.requests[order["id"]]["referenceFeeCents"] * cars / len(order["legs"])
+        base = self.requests[order["id"]]["referenceFeeCents"] * cars / len(order["legs"])
+        cap = base * MAX_FEE_MULTIPLE.get(self.level, 2.5)
         urgent = order["id"] in self.urgent or self.close_to_deadline(order)
-        return steep(self.now, fee, self.level) if urgent else rising(self.now, fee, self.level)
+        # Part B (ticket 06): adaptive opening-fee multiple - rises on unbooked gig expiry
+        # and falls on quick booking via a fading running mean, re-tuned per day. Never below
+        # the level's base opening fee and never above MAX_FEE_MULTIPLE.
+        level_multiple = OPENING_FEE.get(self.level, 1.0)
+        multiple = min(max(level_multiple + self.fee_pressure * 0.1, level_multiple), MAX_FEE_MULTIPLE.get(self.level, 2.5))
+        opening = base * multiple
+        schedule = steep(self.now, base, self.level) if urgent else rising(self.now, opening, self.level)
+        # Never pay more than the order's revenue floor (~2x reference at shortage levels).
+        return [{"at": s["at"], "feeCents": min(s["feeCents"], int(cap + 0.5))} for s in schedule]
+
+    def _gig_expired(self, gig_id: str) -> None:
+        """Ticket 06 (Part B): an unbooked gig expiry raises the opening-fee multiple, so the
+        next opening fee is higher and the gig is more likely to be booked at it."""
+        self.fee_pressure = min(self.fee_pressure + 1.0, 6.0)
+
+    def _gig_booked_quick(self, gig_id: str) -> None:
+        """Ticket 06 (Part B): a gig booked within QUICK_BOOK_MINUTES of posting lowers the
+        opening-fee multiple, so we open cheaper next time when drivers book at the opening fee."""
+        posted = self.gig_posted_at.get(gig_id)
+        if posted is None:
+            return
+        if self.now - posted <= QUICK_BOOK_MINUTES:
+            self.fee_pressure = max(self.fee_pressure - 1.0, -4.0)
 
     def retry(self, order_id: str, leg: int, reason: str) -> None:
         if order_id in self.orders:
@@ -328,6 +424,7 @@ class Desk:
         for stop in action["stops"]:
             self.leg_gigs.setdefault(stop["orderId"], {})[stop["leg"]] = gig_id
         self.posts[gig_id] = action
+        self.gig_posted_at[gig_id] = self.now  # Part B (ticket 06): when the gig was posted
 
     def withdraw(self, order_id: str) -> bool:
         """Takes an order's gigs out of the drivers' app. False, and nothing withdrawn, when a driver holds one of them."""
@@ -381,15 +478,17 @@ def without_windows(stops: list[StopRef], before: float) -> list[StopRef]:
     return [{k: v for k, v in stop.items() if k != "window"} if "window" in stop and stop["window"]["to"] < before else stop for stop in stops]
 
 
-def rising(now: int, fee: float, level: int) -> list[FeeStep]:
+def rising(now: int, opening_fee: float, level: int) -> list[FeeStep]:
     """The fee at once, then 10% of it more every hour: six steps, up to 1.5 times. Level 1 takes one fee only."""
     # int(x + 0.5) rounds halves up, as JavaScript's Math.round does, so both starters post the same fees.
-    return [{"at": now + k * HOUR, "feeCents": max(1, int(fee * (1 + k / 10) + 0.5))} for k in range(1 if level == 1 else 6)]
+    return [{"at": now + k * HOUR, "feeCents": max(1, int(opening_fee * (1 + k / 10) + 0.5))} for k in range(1 if level == 1 else 6)]
 
 
-def steep(now: int, fee: float, level: int) -> list[FeeStep]:
-    """1.5 times the fee at once, then a quarter of it more every half hour, up to 2.5 times. Level 1 takes one fee only."""
-    return [{"at": now + k * 30, "feeCents": max(1, int(fee * (1.5 + k / 4) + 0.5))} for k in range(1 if level == 1 else 5)]
+def steep(now: int, base_fee: float, level: int) -> list[FeeStep]:
+    """1.5 times the fee at once, then a quarter of it more every half hour, up to 2.5 times.
+    Level 1 takes one fee only. fees_for() caps the result at MAX_FEE_MULTIPLE so we never
+    pay more than the order's revenue floor."""
+    return [{"at": now + k * 30, "feeCents": max(1, int(base_fee * (1.5 + k / 4) + 0.5))} for k in range(1 if level == 1 else 5)]
 
 
 def stops_for(order: Order, legs: list[int], note: Optional[Note], retry: Retry) -> list[StopRef]:

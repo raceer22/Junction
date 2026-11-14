@@ -15,10 +15,6 @@ Format a round like so:
 ➡️ <your recommended answer>
 
 ---
-
-❓ **Q2** - **<question title>**: <question body, might be multiple paragraphs, including multiple choices>
-
-➡️ <your recommended answer>
 ```
 
 Word each question so "yes" accepts your recommended answer.
