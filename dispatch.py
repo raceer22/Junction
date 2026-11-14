@@ -22,7 +22,18 @@ HOUR, DAY = 60, 24 * 60
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 # The events that need an answer. Views and account lines arrive with the next event that needs an answer.
 WAKE_ON: list[DeskEventKind] = ["price_request", "order_won", "order_changed", "order_cancelled", "visit_failed", "gig_expired", "deadline_close"]
+
 LARGE_QUOTE= 1000000000000000
+
+RISKY_NOTE_KEYWORDS = [
+    # manual gearbox (driver must hold a manual licence)
+    "manual", "manuaalinen", "käsivaihteisto", "välijarru",
+    # missing / transfer plates (driver needs withPlates)
+    "plates", "kilvet", "rekisterikilvet", "siirtokilvet", "no plates", "missing plates",
+    # call-before-pickup / private seller slot / closing hours
+    "soita", "call before", "ennen kun", "ennen kuin", "private", "yksityinen",
+    "closing", "suljettu",
+]
 
 class Retry(NamedTuple):
     """How to post a leg again after a failed visit."""
@@ -125,6 +136,14 @@ class Desk:
                 return False
         return True
 
+    def _risky_note(self, request: PriceRequest) -> bool:
+        """True when the dealer's note carries a risky keyword (manual gearbox, no plates,
+        call-before-pickup, private slot, closing hours). At shortage levels these are
+        skipped because drivers are scarce and failed visits kill margin."""
+        note = (request.get("note") or "")
+        text = note.lower()
+        return any(kw in text for kw in RISKY_NOTE_KEYWORDS)
+
     def _should_bid(self, request: PriceRequest, option: dict) -> bool:
         ref = request["referenceFeeCents"]
         lp = option["listPriceCents"]
@@ -142,7 +161,8 @@ class Desk:
 
         # 3. Risky notes: manual gearbox, missing plates, call-before-pickup, private-seller slot.
         #    At shortage levels (7-8) these are too risky; at lower levels accept with caution.
-
+        if self.level >= 7 and self._risky_note(request):
+            return False
         return True
 
 
@@ -153,7 +173,7 @@ class Desk:
         # that could steer them to a less profitable option.
         best: Optional[tuple[str, int]] = None  # (option kind, price)
         for option in request["options"]:
-            if not self._should_bid(request):
+            if not self._should_bid(request, option):
                 continue
             # Margin estimate: list price minus the base driver fee (one reference fee per gig)
             margin = option["listPriceCents"] - request["referenceFeeCents"]
