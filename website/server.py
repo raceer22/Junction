@@ -399,6 +399,31 @@ def _read_reveal_csv_files(reveal_dir: Path) -> dict[str, str]:
     return files
 
 
+def _fetch_world_score(python_bin: str, env: dict[str, str], world_id: str) -> dict[str, Any] | None:
+    """Fetch authoritative end-of-world score (`marginCents`, `onTimeShare`, `wonOrders`, `ranked`) via `spread`."""
+    try:
+        score_proc = subprocess.run(
+            [
+                python_bin,
+                "-c",
+                "import json, sys, spread; print(json.dumps(spread.Client().world(sys.argv[1]).score()))",
+                world_id,
+            ],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if score_proc.returncode == 0 and score_proc.stdout.strip():
+            parsed = json.loads(score_proc.stdout.strip().splitlines()[-1])
+            if isinstance(parsed, dict):
+                return parsed
+    except Exception:
+        pass
+    return None
+
+
 def _run_simulation_job(job_id: str, level: int, seed: str | None) -> None:
     """Background worker: runs `dispatch.py --level N [--seed S] --custom` then `spread.reveal_csv <world_id>`."""
     global _ACTIVE_JOB_ID, _ACTIVE_PROC
@@ -477,7 +502,10 @@ def _run_simulation_job(job_id: str, level: int, seed: str | None) -> None:
         # Verify CSV files exist on disk
         _read_reveal_csv_files(reveal_dir)
 
+        score = _fetch_world_score(python_bin, env, world_id)
+
         with _SIM_LOCK:
+            job["score"] = score
             job["phase"] = "done"
             job["status"] = "done"
             job["finishedAt"] = time.monotonic()
@@ -547,6 +575,7 @@ def start_simulation(payload: Any) -> tuple[int, dict[str, Any]]:
             "seed": seed,
             "worldId": None,
             "revealFolder": None,
+            "score": None,
             "latestLine": "Starting simulation...",
             "summaryLine": None,
             "logs": [],
@@ -587,6 +616,7 @@ def get_simulation_status(job_id: str) -> dict[str, Any]:
             "seed": job["seed"],
             "worldId": job["worldId"],
             "folder": job["revealFolder"],
+            "score": job["score"],
             "latestLine": job["latestLine"],
             "summaryLine": job["summaryLine"],
             "logs": list(job["logs"]),

@@ -204,11 +204,17 @@
 
       <!-- On-time Delivery Rate (Spread challenge requirement: >= 90%) -->
       <div class="flex items-center gap-2.5 px-3 py-1.5 rounded bg-surface-container border border-white/5 shadow-sm">
-        <span class="material-symbols-outlined text-[20px] text-primary-fixed-dim">verified</span>
+        <span class="material-symbols-outlined text-[20px] text-primary-fixed-dim" id="kpiUtilizationIcon">verified</span>
         <div class="flex flex-col">
           <span class="text-[10px] font-mono text-on-surface-variant uppercase">On-Time Rate</span>
-          <span class="text-base font-bold font-mono text-primary-fixed-dim" id="kpiUtilization">100.0%</span>
+          <span class="text-base font-bold font-mono text-primary-fixed-dim" id="kpiUtilization">100.00%</span>
         </div>
+      </div>
+
+      <!-- End-of-Simulation Failure Warning Box (shown if final delivery rate < 90.00% or final margin < €0.00) -->
+      <div id="simFailureWarningBox" role="alert" class="hidden items-center gap-2 px-3 py-1.5 rounded bg-error/15 border border-error/60 text-error shadow-[0_0_14px_rgba(255,82,82,0.22)]">
+        <span class="material-symbols-outlined text-[18px] text-error flex-shrink-0">warning</span>
+        <span id="simFailureWarningText" class="text-xs font-mono font-bold tracking-tight">Simulation failed: —</span>
       </div>
     </div>
   </div>
