@@ -49,7 +49,7 @@
       }
     };
   </script>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=2">
 </head>
 <body class="bg-surface text-on-surface min-h-screen flex flex-col selection:bg-primary selection:text-surface">
 
@@ -207,7 +207,8 @@
         <span class="material-symbols-outlined text-[20px] text-primary-fixed-dim" id="kpiUtilizationIcon">verified</span>
         <div class="flex flex-col">
           <span class="text-[10px] font-mono text-on-surface-variant uppercase">On-Time Rate</span>
-          <span class="text-base font-bold font-mono text-primary-fixed-dim" id="kpiUtilization">100.00%</span>
+          <span class="text-base font-bold font-mono text-primary-fixed-dim leading-tight" id="kpiUtilization">—</span>
+          <span class="text-[9px] font-mono text-on-surface-variant leading-tight" id="kpiUtilizationSub">Final: —</span>
         </div>
       </div>
 
@@ -792,6 +793,6 @@
   <!-- Local Config (API keys, optional) -->
   <script src="config.js"></script>
   <!-- App Engine Logic -->
-  <script src="app.js"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

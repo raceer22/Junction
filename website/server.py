@@ -675,6 +675,11 @@ class WebsiteRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(WEBSITE_DIR), **kwargs)
 
+    def end_headers(self) -> None:
+        if not urlparse(self.path).path.startswith("/api/"):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
     def _send_cors_headers(self) -> None:
         origin = _allowed_cors_origin(self.headers.get("Origin"))
         if origin:

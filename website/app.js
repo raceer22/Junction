@@ -140,7 +140,7 @@ function formatRatePct(pct, isBelowMinimum = false) {
   return pct.toFixed(2);
 }
 
-function evaluateSimulationOutcome(finalMarginCents, finalOnTimePct, wonOrders) {
+function evaluateSimulationOutcome(finalMarginCents, finalOnTimePct, wonOrders, onTimeOrders = 0) {
   const marginFailed = finalMarginCents < 0;
   const deliveryFailed = finalOnTimePct < 90.0 - 1e-9;
   const reasons = [];
@@ -155,6 +155,7 @@ function evaluateSimulationOutcome(finalMarginCents, finalOnTimePct, wonOrders) 
     marginCents: finalMarginCents,
     onTimePct: finalOnTimePct,
     wonOrders,
+    onTimeOrders,
     marginFailed,
     deliveryFailed,
     failed,
@@ -210,6 +211,8 @@ function indexDataset(raw, serverScore = null) {
   state.legs = {};
   const legCountByOrder = {};
   const legTruthDeliveredByOrder = {};
+  const legNoteDeadlineByOrder = {};
+  const legPrivateDeadlineByOrder = {};
   for (const l of toList(raw.legs)) {
     const orderId = l.requestId || l.orderId;
     if (!orderId) continue;
@@ -219,9 +222,20 @@ function indexDataset(raw, serverScore = null) {
     const readyAt = l['truth.readyAt'] ? parseInt(l['truth.readyAt'], 10) : (l.readyAt ? parseInt(l.readyAt, 10) : null);
     const pickedUpAt = l['truth.pickedUpAt'] ? parseInt(l['truth.pickedUpAt'], 10) : (l.pickedUpAt ? parseInt(l.pickedUpAt, 10) : null);
     const deliveredAt = l['truth.deliveredAt'] ? parseInt(l['truth.deliveredAt'], 10) : (l.deliveredAt ? parseInt(l.deliveredAt, 10) : null);
+    const noteDeadline = l['truth.noteDeadline'] ? parseInt(l['truth.noteDeadline'], 10) : null;
+    const isPrivateDelivery = l['delivery.privateAddress'] === 'true' || l.deliveryPrivateAddress === true;
+    const deliveryWindowTo = l['delivery.window.to'] ? parseInt(l['delivery.window.to'], 10) : null;
     if (Number.isFinite(deliveredAt)) {
       if (!legTruthDeliveredByOrder[orderId]) legTruthDeliveredByOrder[orderId] = {};
       legTruthDeliveredByOrder[orderId][safeLegIdx] = deliveredAt;
+    }
+    if (Number.isFinite(noteDeadline)) {
+      if (!legNoteDeadlineByOrder[orderId]) legNoteDeadlineByOrder[orderId] = {};
+      legNoteDeadlineByOrder[orderId][safeLegIdx] = noteDeadline;
+    }
+    if (isPrivateDelivery && Number.isFinite(deliveryWindowTo)) {
+      if (!legPrivateDeadlineByOrder[orderId]) legPrivateDeadlineByOrder[orderId] = {};
+      legPrivateDeadlineByOrder[orderId][safeLegIdx] = deliveryWindowTo + 30;
     }
     state.legs[orderId] = {
       orderId: orderId,
@@ -291,18 +305,18 @@ function indexDataset(raw, serverScore = null) {
   const gigDeliveredAt = {};
   const gigBookedFee = {};
 
-  const parseNumLegsFromEvent = (ev, oid) => {
+  const parseLegsArrayFromEvent = (ev) => {
     const rawLegs = ev['order.legs'] !== undefined ? ev['order.legs'] : (ev.order && ev.order.legs);
-    if (Array.isArray(rawLegs) && rawLegs.length > 0) return rawLegs.length;
+    if (Array.isArray(rawLegs) && rawLegs.length > 0) return rawLegs;
     if (typeof rawLegs === 'string' && rawLegs.trim() !== '') {
       try {
         const parsed = JSON.parse(rawLegs);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed.length;
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       } catch (_) {
-        // Ignore malformed JSON and fall back to legs.csv count
+        // Ignore malformed JSON
       }
     }
-    return legCountByOrder[oid] || 1;
+    return null;
   };
 
   const parseDeadlineFromEvent = (ev) => {
@@ -323,10 +337,37 @@ function indexDataset(raw, serverScore = null) {
         numLegs: legCountByOrder[oid] || 1,
         cancelled: false,
         cancelledAt: null,
-        deliveredAtByLeg: {}
+        revenueAt: null,
+        lateRefundAt: null,
+        undeliveredAt: null,
+        privateDeadlineByLeg: {},
+        deliveredAtByLeg: {},
+        legDeadlines: {}
       };
     }
     return state.ordersMeta[oid];
+  };
+
+  const applyEventOrderSpec = (meta, ev, oid) => {
+    const parsedDeadline = parseDeadlineFromEvent(ev);
+    if (parsedDeadline !== null) meta.deadline = parsedDeadline;
+    const legsArr = parseLegsArrayFromEvent(ev);
+    if (legsArr) {
+      meta.numLegs = legsArr.length;
+      legsArr.forEach((legObj, idx) => {
+        if (
+          legObj &&
+          legObj.delivery &&
+          legObj.delivery.privateAddress &&
+          legObj.delivery.window &&
+          Number.isFinite(legObj.delivery.window.to)
+        ) {
+          meta.privateDeadlineByLeg[idx] = legObj.delivery.window.to + 30;
+        }
+      });
+    } else if (!meta.numLegs) {
+      meta.numLegs = legCountByOrder[oid] || 1;
+    }
   };
 
   for (const ev of toList(raw.events)) {
@@ -335,6 +376,14 @@ function indexDataset(raw, serverScore = null) {
     const kind = ev.kind;
 
     if (kind === 'ledger') {
+      const ledgerKind = ev['line.kind'] || (ev.line && ev.line.kind) || ev.ledgerKind || '';
+      const lineOrderId = ev['line.orderId'] || (ev.line && ev.line.orderId) || ev.orderId || null;
+      if (lineOrderId) {
+        const meta = ensureOrderMeta(lineOrderId, at);
+        if (ledgerKind === 'revenue') meta.revenueAt = at;
+        else if (ledgerKind === 'late_refund') meta.lateRefundAt = at;
+        else if (ledgerKind === 'undelivered_penalty') meta.undeliveredAt = at;
+      }
       const rawCents = ev['line.cents'] !== undefined && ev['line.cents'] !== ''
         ? ev['line.cents']
         : (ev.line && ev.line.cents !== undefined ? ev.line.cents : ev.cents);
@@ -343,9 +392,9 @@ function indexDataset(raw, serverScore = null) {
         state.ledgerEvents.push({
           seq,
           at,
-          ledgerKind: ev['line.kind'] || (ev.line && ev.line.kind) || ev.ledgerKind || '',
+          ledgerKind,
           cents,
-          orderId: ev['line.orderId'] || (ev.line && ev.line.orderId) || ev.orderId || null,
+          orderId: lineOrderId,
           gigId: ev['line.gigId'] || (ev.line && ev.line.gigId) || ev.gigId || null
         });
       }
@@ -356,9 +405,7 @@ function indexDataset(raw, serverScore = null) {
       const changedOrderId = ev['order.id'] || (ev.order && ev.order.id) || ev.orderId || null;
       if (changedOrderId) {
         const meta = ensureOrderMeta(changedOrderId, at);
-        const newDeadline = parseDeadlineFromEvent(ev);
-        if (newDeadline !== null) meta.deadline = newDeadline;
-        meta.numLegs = parseNumLegsFromEvent(ev, changedOrderId);
+        applyEventOrderSpec(meta, ev, changedOrderId);
         const changedPrice = ev['order.priceCents'] !== undefined && ev['order.priceCents'] !== ''
           ? parseInt(ev['order.priceCents'], 10)
           : (ev.order && Number.isFinite(ev.order.priceCents) ? ev.order.priceCents : null);
@@ -383,9 +430,7 @@ function indexDataset(raw, serverScore = null) {
         }
         const meta = ensureOrderMeta(orderId, at);
         meta.wonAt = at;
-        const parsedDeadline = parseDeadlineFromEvent(ev);
-        if (parsedDeadline !== null) meta.deadline = parsedDeadline;
-        meta.numLegs = parseNumLegsFromEvent(ev, orderId);
+        applyEventOrderSpec(meta, ev, orderId);
       }
       if (kind === 'order_cancelled' && orderId) {
         const meta = ensureOrderMeta(orderId, at);
@@ -423,21 +468,30 @@ function indexDataset(raw, serverScore = null) {
   state.events.sort((a, b) => a.at - b.at || a.seq - b.seq);
   state.ledgerEvents.sort((a, b) => a.at - b.at || a.seq - b.seq);
 
-  // Fallback won-order & delivery population for precompiled/stripped CSV sets
+  // Merge truth.deliveredAt (counts next-morning site opening per Rule 4) and per-leg deadlines
   for (const req of Object.values(state.requests)) {
     if (req.outcome === 'won' && !state.ordersMeta[req.id]) {
       ensureOrderMeta(req.id, req.arrivedAt || 0);
     }
   }
   for (const meta of Object.values(state.ordersMeta)) {
-    const truthMap = legTruthDeliveredByOrder[meta.orderId];
+    const oid = meta.orderId;
+    const truthMap = legTruthDeliveredByOrder[oid];
     if (truthMap) {
       for (const [legIdxStr, truthAt] of Object.entries(truthMap)) {
         const idx = parseInt(legIdxStr, 10);
-        if (meta.deliveredAtByLeg[idx] === undefined) {
-          meta.deliveredAtByLeg[idx] = truthAt;
-        }
+        // Prefer truth.deliveredAt over raw dropoff event (Rule 4 closed dealer site counts when site next opens)
+        meta.deliveredAtByLeg[idx] = truthAt;
       }
+    }
+    for (let i = 0; i < meta.numLegs; i++) {
+      const candidates = [];
+      if (meta.deadline !== null) candidates.push(meta.deadline);
+      const privDl = meta.privateDeadlineByLeg[i] ?? (legPrivateDeadlineByOrder[oid] && legPrivateDeadlineByOrder[oid][i]);
+      if (Number.isFinite(privDl)) candidates.push(privDl);
+      const noteDl = legNoteDeadlineByOrder[oid] && legNoteDeadlineByOrder[oid][i];
+      if (Number.isFinite(noteDl)) candidates.push(noteDl);
+      meta.legDeadlines[i] = candidates.length > 0 ? Math.min(...candidates) : null;
     }
   }
 
@@ -496,6 +550,7 @@ function indexDataset(raw, serverScore = null) {
   let finalMarginCents = 0;
   let finalOnTimePct = 0.0;
   let wonOrdersCount = 0;
+  let onTimeOrdersCount = 0;
 
   if (
     serverScore &&
@@ -506,35 +561,39 @@ function indexDataset(raw, serverScore = null) {
     wonOrdersCount = Number.isFinite(serverScore.wonOrders) ? serverScore.wonOrders : 0;
     finalMarginCents = Math.round(serverScore.marginCents);
     finalOnTimePct = wonOrdersCount > 0 ? serverScore.onTimeShare * 100 : 0.0;
+    onTimeOrdersCount = Math.round(serverScore.onTimeShare * wonOrdersCount);
   } else {
     const activeWonOrders = Object.values(state.ordersMeta).filter(m => !m.cancelled);
     wonOrdersCount = activeWonOrders.length;
-    let onTimeCount = 0;
-    for (const meta of activeWonOrders) {
-      let allDelivered = true;
-      let maxDeliv = -Infinity;
-      for (let i = 0; i < meta.numLegs; i++) {
-        const dAt = meta.deliveredAtByLeg[i];
-        if (!Number.isFinite(dAt)) {
-          allDelivered = false;
-          break;
-        }
-        if (dAt > maxDeliv) maxDeliv = dAt;
-      }
-      if (allDelivered && (meta.deadline === null || maxDeliv <= meta.deadline)) {
-        onTimeCount++;
-      }
-    }
-    finalOnTimePct = wonOrdersCount > 0 ? (onTimeCount / wonOrdersCount) * 100 : 0.0;
 
     if (state.ledgerEvents.length > 0) {
+      // Canonical Spread rule (RULES.md line 165): an order's revenue line with no late_refund is on time
+      for (const meta of activeWonOrders) {
+        if (meta.revenueAt !== null && meta.lateRefundAt === null) {
+          onTimeOrdersCount++;
+        }
+      }
       finalMarginCents = state.ledgerEvents.reduce((sum, ev) => sum + ev.cents, 0);
     } else {
+      // Fallback for stripped datasets without ledger lines
+      for (const meta of activeWonOrders) {
+        let allOnTime = true;
+        for (let i = 0; i < meta.numLegs; i++) {
+          const dAt = meta.deliveredAtByLeg[i];
+          const dl = meta.legDeadlines[i];
+          if (!Number.isFinite(dAt) || (dl !== null && dl !== undefined && dAt > dl)) {
+            allOnTime = false;
+            break;
+          }
+        }
+        if (allOnTime) onTimeOrdersCount++;
+      }
       finalMarginCents = computeActiveTransits(state.maxT).cumulativeMargin;
     }
+    finalOnTimePct = wonOrdersCount > 0 ? (onTimeOrdersCount / wonOrdersCount) * 100 : 0.0;
   }
 
-  state.simOutcome = evaluateSimulationOutcome(finalMarginCents, finalOnTimePct, wonOrdersCount);
+  state.simOutcome = evaluateSimulationOutcome(finalMarginCents, finalOnTimePct, wonOrdersCount, onTimeOrdersCount);
   renderSimFailureWarning(state.simOutcome);
 
   // Redraw maps and HUD
@@ -715,38 +774,93 @@ function renderVectorMap() {
 // ==========================================
 // 6. SPATIAL APPROXIMATION & VEHICLE MOVEMENT
 // ==========================================
-function computeOrderOnTimePct(currentMinute) {
+function computeOrderOnTimeStats(currentMinute) {
+  const finalPct = state.simOutcome ? state.simOutcome.onTimePct : 0.0;
+  const finalOnTime = state.simOutcome ? state.simOutcome.onTimeOrders : 0;
+  const finalWon = state.simOutcome ? state.simOutcome.wonOrders : 0;
+
   if (state.simOutcome && currentMinute >= state.endEvalT) {
-    return state.simOutcome.onTimePct;
+    return {
+      onTimePct: finalPct,
+      onTimeOrders: finalOnTime,
+      settledOrders: finalWon,
+      isFinalSummary: true
+    };
   }
+
+  const hasLedger = state.ledgerEvents.length > 0;
   let settled = 0;
   let onTime = 0;
+
   for (const meta of Object.values(state.ordersMeta)) {
     if (meta.wonAt > currentMinute) continue;
     if (meta.cancelled && (meta.cancelledAt === null || meta.cancelledAt <= currentMinute)) continue;
-    let allDelivered = true;
-    let maxDeliv = -Infinity;
-    for (let i = 0; i < meta.numLegs; i++) {
-      const dAt = meta.deliveredAtByLeg[i];
-      if (!Number.isFinite(dAt) || dAt > currentMinute) {
-        allDelivered = false;
-        break;
+
+    if (hasLedger) {
+      if (meta.revenueAt !== null && meta.revenueAt <= currentMinute) {
+        settled++;
+        if (meta.lateRefundAt === null) {
+          onTime++;
+        }
+        continue;
       }
-      if (dAt > maxDeliv) maxDeliv = dAt;
-    }
-    if (allDelivered) {
-      settled++;
-      if (meta.deadline === null || maxDeliv <= meta.deadline) {
-        onTime++;
+      if (meta.undeliveredAt !== null && meta.undeliveredAt <= currentMinute) {
+        settled++;
+        continue;
       }
-    } else if (meta.deadline !== null && currentMinute > meta.deadline) {
-      settled++;
+      let missedLegDeadline = false;
+      for (let i = 0; i < meta.numLegs; i++) {
+        const dl = meta.legDeadlines[i];
+        const dAt = meta.deliveredAtByLeg[i];
+        if (dl !== null && dl !== undefined && currentMinute > dl && (!Number.isFinite(dAt) || dAt > dl)) {
+          missedLegDeadline = true;
+          break;
+        }
+      }
+      if (missedLegDeadline) {
+        settled++;
+      }
+    } else {
+      let allDelivered = true;
+      let allWithinDeadline = true;
+      let missedLegDeadline = false;
+      for (let i = 0; i < meta.numLegs; i++) {
+        const dAt = meta.deliveredAtByLeg[i];
+        const dl = meta.legDeadlines[i];
+        if (!Number.isFinite(dAt) || dAt > currentMinute) {
+          allDelivered = false;
+          if (dl !== null && dl !== undefined && currentMinute > dl) {
+            missedLegDeadline = true;
+          }
+        } else if (dl !== null && dl !== undefined && dAt > dl) {
+          allWithinDeadline = false;
+        }
+      }
+      if (allDelivered) {
+        settled++;
+        if (allWithinDeadline) onTime++;
+      } else if (missedLegDeadline) {
+        settled++;
+      }
     }
   }
+
+  // Before any order settles (e.g. Monday morning right after simulation finishes), show the run's true final rate
   if (settled === 0) {
-    return (state.simOutcome && state.simOutcome.wonOrders === 0) ? 0.0 : 100.0;
+    return {
+      onTimePct: finalPct,
+      onTimeOrders: finalOnTime,
+      settledOrders: 0,
+      isFinalSummary: true
+    };
   }
-  return (onTime / settled) * 100;
+
+  return {
+    onTimePct: (onTime / settled) * 100,
+    onTimeOrders: onTime,
+    settledOrders: settled,
+    isFinalSummary: false
+  };
 }
 
 function computeActiveTransits(currentMinute) {
@@ -824,7 +938,7 @@ function computeActiveTransits(currentMinute) {
     cumulativeMargin = cumulativeRevenue - cumulativeCosts;
   }
 
-  const onTimePct = computeOrderOnTimePct(currentMinute);
+  const onTimeStats = computeOrderOnTimeStats(currentMinute);
 
   return {
     activeTransits,
@@ -833,7 +947,8 @@ function computeActiveTransits(currentMinute) {
     cumulativeRevenue,
     cumulativeCosts,
     cumulativeMargin,
-    onTimePct
+    onTimePct: onTimeStats.onTimePct,
+    onTimeStats
   };
 }
 
@@ -1043,16 +1158,26 @@ function updateHUD(metrics, t) {
   const onTimeRate = formatRatePct(metrics.onTimePct, isBelowMin);
   const kpiRate = document.getElementById('kpiUtilization');
   const kpiRateIcon = document.getElementById('kpiUtilizationIcon');
+  const kpiRateSub = document.getElementById('kpiUtilizationSub');
   if (kpiRate) {
     kpiRate.textContent = `${onTimeRate}%`;
     kpiRate.className = isBelowMin
-      ? 'text-base font-bold font-mono text-error'
-      : 'text-base font-bold font-mono text-primary-fixed-dim';
+      ? 'text-base font-bold font-mono text-error leading-tight'
+      : 'text-base font-bold font-mono text-primary-fixed-dim leading-tight';
   }
   if (kpiRateIcon) {
     kpiRateIcon.className = isBelowMin
       ? 'material-symbols-outlined text-[20px] text-error'
       : 'material-symbols-outlined text-[20px] text-primary-fixed-dim';
+  }
+  if (kpiRateSub && state.simOutcome) {
+    const finalBelow = state.simOutcome.onTimePct < 90.0 - 1e-9;
+    const finalRateStr = formatRatePct(state.simOutcome.onTimePct, finalBelow);
+    if (metrics.onTimeStats && !metrics.onTimeStats.isFinalSummary) {
+      kpiRateSub.textContent = `${metrics.onTimeStats.onTimeOrders}/${metrics.onTimeStats.settledOrders} • End ${finalRateStr}%`;
+    } else {
+      kpiRateSub.textContent = `Final: ${state.simOutcome.onTimeOrders}/${state.simOutcome.wonOrders} on time`;
+    }
   }
 }
 
