@@ -1408,6 +1408,10 @@ function resetCustomArgsToDefaults() {
     OPENING_FEE: 1.30,
     MAX_FEE_MULTIPLE: 2.20
   };
+  const levelSelect = document.getElementById('simRunLevel');
+  if (levelSelect) levelSelect.value = '8';
+  const seedSelect = document.getElementById('simRunSeed');
+  if (seedSelect) seedSelect.value = 'random';
   renderCustomArgsForm();
   setCustomArgsStatus('Defaults restored — click "Save & Run Simulation" to apply.', 'info');
 }
@@ -1599,6 +1603,9 @@ async function submitCustomArgsForm(event) {
 
   const levelSelect = document.getElementById('simRunLevel');
   const runLevel = levelSelect ? parseInt(levelSelect.value, 10) || 8 : 8;
+  const seedSelect = document.getElementById('simRunSeed');
+  const runSeed = seedSelect ? seedSelect.value : 'random';
+  const seedFlagText = runSeed && runSeed !== 'random' ? ` --seed ${runSeed}` : '';
   const isUniform = customArgsState.selectedScope === 'all';
   const payloadValues = {};
 
@@ -1613,10 +1620,10 @@ async function submitCustomArgsForm(event) {
   setCustomFormBusy(true, runLevel);
   updateSimProgressPanel({
     visible: true,
-    phaseText: `Writing custom_args.py & starting dispatch.py --level ${runLevel} --custom...`,
+    phaseText: `Writing custom_args.py & starting dispatch.py --level ${runLevel}${seedFlagText} --custom...`,
     worldId: null,
     elapsedSeconds: 0,
-    logs: [`Preparing simulation (level ${runLevel})...`],
+    logs: [`Preparing simulation (level ${runLevel}, seed: ${runSeed})...`],
     isError: false
   });
   setCustomArgsStatus('Simulation in progress — waiting for dispatch.py to finish...', 'info');
@@ -1624,6 +1631,7 @@ async function submitCustomArgsForm(event) {
   try {
     const startResp = await callBackendApi('api/simulate', 'POST', {
       level: runLevel,
+      seed: runSeed,
       scope: isUniform ? 'uniform' : 'per_level',
       values: payloadValues
     });
@@ -1664,7 +1672,7 @@ async function submitCustomArgsForm(event) {
 
       const phaseLabel = statusResp.phase === 'generating_csv'
         ? `Generating CSV dataset (${statusResp.folder || 'spread-reveal-csv'})...`
-        : `Running python3 dispatch.py --level ${runLevel} --custom...`;
+        : `Running python3 dispatch.py --level ${runLevel}${seedFlagText} --custom...`;
 
       updateSimProgressPanel({
         visible: true,
@@ -1691,7 +1699,8 @@ async function submitCustomArgsForm(event) {
 
     const resultResp = await callBackendApi(`api/simulate/result?jobId=${encodeURIComponent(jobId)}`, 'GET');
     const fileEntries = Object.entries(resultResp.files || {});
-    const datasetLabel = `Custom Sim • ${resultResp.folder} (Level ${resultResp.level})`;
+    const seedLabel = resultResp.seed ? `, Seed ${resultResp.seed}` : '';
+    const datasetLabel = `Custom Sim • ${resultResp.folder} (Level ${resultResp.level}${seedLabel})`;
     const matched = ingestCsvEntries(fileEntries, datasetLabel);
     if (matched === 0) {
       throw new Error('Simulation finished, but no valid CSV tables were returned.');

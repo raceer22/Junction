@@ -464,7 +464,7 @@
           <div class="flex items-center gap-2">
             <label for="simRunLevel" class="text-xs font-mono font-bold uppercase text-secondary flex items-center gap-1.5">
               <span class="material-symbols-outlined text-[16px]">play_circle</span>
-              <span>Simulation Level:</span>
+              <span>Level:</span>
             </label>
             <select id="simRunLevel" class="custom-select rounded-lg px-3 py-1.5 text-xs font-mono border border-secondary/35">
               <option value="8" selected>Level 8 (--level 8)</option>
@@ -479,9 +479,24 @@
           </div>
 
           <div class="flex items-center gap-2">
+            <label for="simRunSeed" class="text-xs font-mono font-bold uppercase text-tertiary flex items-center gap-1.5">
+              <span class="material-symbols-outlined text-[16px]">casino</span>
+              <span>Seed:</span>
+            </label>
+            <select id="simRunSeed" class="custom-select rounded-lg px-3 py-1.5 text-xs font-mono border border-tertiary/35">
+              <option value="random" selected>Random (Default)</option>
+              <option value="1">Seed 1 (--seed 1)</option>
+              <option value="2">Seed 2 (--seed 2)</option>
+              <option value="3">Seed 3 (--seed 3)</option>
+              <option value="4">Seed 4 (--seed 4)</option>
+              <option value="5">Seed 5 (--seed 5)</option>
+            </select>
+          </div>
+
+          <div class="flex items-center gap-2">
             <label for="customLevelScope" class="text-xs font-mono font-bold uppercase text-primary flex items-center gap-1.5">
               <span class="material-symbols-outlined text-[16px]">layers</span>
-              <span>Edit Constants Scope:</span>
+              <span>Edit Scope:</span>
             </label>
             <select id="customLevelScope" class="custom-select rounded-lg px-3 py-1.5 text-xs font-mono border border-primary/35" onchange="handleCustomScopeChange(this.value)">
               <option value="8">Level 8 — Final / Full Market</option>

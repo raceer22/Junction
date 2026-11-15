@@ -41,6 +41,7 @@ DOTENV_FILE = REPO_ROOT / ".env"
 VENV_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
 
 LEVELS = tuple(range(1, 9))
+ALLOWED_SEEDS = ("1", "2", "3", "4", "5")
 WORLD_ID_RE = re.compile(r"\b(?:Practice world|Ranking run)\s+([A-Za-z0-9_-]+)")
 REVEAL_CSV_NAMES = (
     "places.csv",
@@ -398,17 +399,23 @@ def _read_reveal_csv_files(reveal_dir: Path) -> dict[str, str]:
     return files
 
 
-def _run_simulation_job(job_id: str, level: int) -> None:
-    """Background worker: runs `dispatch.py --level N --custom` then `spread.reveal_csv <world_id>`."""
+def _run_simulation_job(job_id: str, level: int, seed: str | None) -> None:
+    """Background worker: runs `dispatch.py --level N [--seed S] --custom` then `spread.reveal_csv <world_id>`."""
     global _ACTIVE_JOB_ID, _ACTIVE_PROC
     job = _SIM_JOBS[job_id]
     python_bin = _resolve_python_bin()
     env = _build_subprocess_env()
 
     try:
-        # Phase 1: Run dispatch.py --level <level> --custom
-        dispatch_cmd = [python_bin, str(DISPATCH_FILE), "--level", str(level), "--custom"]
-        _append_job_log(job, f"$ python3 dispatch.py --level {level} --custom")
+        # Phase 1: Run dispatch.py --level <level> [--seed <seed>] --custom
+        dispatch_cmd = [python_bin, str(DISPATCH_FILE), "--level", str(level)]
+        cmd_display = f"$ python3 dispatch.py --level {level}"
+        if seed is not None:
+            dispatch_cmd += ["--seed", seed]
+            cmd_display += f" --seed {seed}"
+        dispatch_cmd.append("--custom")
+        cmd_display += " --custom"
+        _append_job_log(job, cmd_display)
         proc = subprocess.Popen(
             dispatch_cmd,
             cwd=str(REPO_ROOT),
@@ -504,6 +511,18 @@ def start_simulation(payload: Any) -> tuple[int, dict[str, Any]]:
         if raw_level not in LEVELS:
             raise ValueError("Simulation level must be between 1 and 8.")
     level = int(raw_level)
+
+    raw_seed = payload.get("seed", "random")
+    if raw_seed is None or raw_seed == "" or raw_seed == "random":
+        seed: str | None = None
+    else:
+        if isinstance(raw_seed, bool) or not isinstance(raw_seed, (str, int)):
+            raise ValueError("Seed must be 'random' or one of the preset seeds.")
+        seed_str = str(raw_seed).strip()
+        if seed_str not in ALLOWED_SEEDS:
+            raise ValueError(f"Seed must be 'random' or one of: {', '.join(ALLOWED_SEEDS)}.")
+        seed = seed_str
+
     wait_for_completion = bool(payload.get("wait", False))
 
     with _SIM_LOCK:
@@ -525,6 +544,7 @@ def start_simulation(payload: Any) -> tuple[int, dict[str, Any]]:
             "status": "running",
             "phase": "running_dispatch",
             "level": level,
+            "seed": seed,
             "worldId": None,
             "revealFolder": None,
             "latestLine": "Starting simulation...",
@@ -539,7 +559,7 @@ def start_simulation(payload: Any) -> tuple[int, dict[str, Any]]:
         _SIM_JOBS[job_id] = job
         _ACTIVE_JOB_ID = job_id
 
-    worker = threading.Thread(target=_run_simulation_job, args=(job_id, level), daemon=True)
+    worker = threading.Thread(target=_run_simulation_job, args=(job_id, level, seed), daemon=True)
     worker.start()
 
     if wait_for_completion:
@@ -564,6 +584,7 @@ def get_simulation_status(job_id: str) -> dict[str, Any]:
             "status": job["status"],
             "phase": job["phase"],
             "level": job["level"],
+            "seed": job["seed"],
             "worldId": job["worldId"],
             "folder": job["revealFolder"],
             "latestLine": job["latestLine"],
