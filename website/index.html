@@ -458,27 +458,46 @@
         </button>
       </div>
 
-      <!-- Scope Bar (Dropdown + Reset) -->
+      <!-- Scope Bar (Dropdowns + Reset) -->
       <div class="px-6 py-3 bg-surface-container border-b border-white/10 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
-        <div class="flex flex-wrap items-center gap-3">
-          <label for="customLevelScope" class="text-xs font-mono font-bold uppercase text-primary flex items-center gap-1.5">
-            <span class="material-symbols-outlined text-[16px]">layers</span>
-            <span>Per-Level Editing Scope:</span>
-          </label>
-          <select id="customLevelScope" class="custom-select rounded-lg px-3 py-1.5 text-xs font-mono border border-primary/35" onchange="handleCustomScopeChange(this.value)">
-            <option value="8">Level 8 — Final / Full Market</option>
-            <option value="all">All Levels (Uniform L1–L8)</option>
-            <option value="7">Level 7 — Driver Shortage</option>
-            <option value="6">Level 6</option>
-            <option value="5">Level 5</option>
-            <option value="4">Level 4</option>
-            <option value="3">Level 3</option>
-            <option value="2">Level 2</option>
-            <option value="1">Level 1</option>
-          </select>
+        <div class="flex flex-wrap items-center gap-4">
+          <div class="flex items-center gap-2">
+            <label for="simRunLevel" class="text-xs font-mono font-bold uppercase text-secondary flex items-center gap-1.5">
+              <span class="material-symbols-outlined text-[16px]">play_circle</span>
+              <span>Simulation Level:</span>
+            </label>
+            <select id="simRunLevel" class="custom-select rounded-lg px-3 py-1.5 text-xs font-mono border border-secondary/35">
+              <option value="8" selected>Level 8 (--level 8)</option>
+              <option value="7">Level 7 (--level 7)</option>
+              <option value="6">Level 6 (--level 6)</option>
+              <option value="5">Level 5 (--level 5)</option>
+              <option value="4">Level 4 (--level 4)</option>
+              <option value="3">Level 3 (--level 3)</option>
+              <option value="2">Level 2 (--level 2)</option>
+              <option value="1">Level 1 (--level 1)</option>
+            </select>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <label for="customLevelScope" class="text-xs font-mono font-bold uppercase text-primary flex items-center gap-1.5">
+              <span class="material-symbols-outlined text-[16px]">layers</span>
+              <span>Edit Constants Scope:</span>
+            </label>
+            <select id="customLevelScope" class="custom-select rounded-lg px-3 py-1.5 text-xs font-mono border border-primary/35" onchange="handleCustomScopeChange(this.value)">
+              <option value="8">Level 8 — Final / Full Market</option>
+              <option value="all">All Levels (Uniform L1–L8)</option>
+              <option value="7">Level 7 — Driver Shortage</option>
+              <option value="6">Level 6</option>
+              <option value="5">Level 5</option>
+              <option value="4">Level 4</option>
+              <option value="3">Level 3</option>
+              <option value="2">Level 2</option>
+              <option value="1">Level 1</option>
+            </select>
+          </div>
         </div>
 
-        <button type="button" class="px-3 py-1.5 rounded-lg bg-surface-container-high hover:bg-surface-container-highest text-on-surface-variant hover:text-on-surface text-xs font-mono border border-white/10 transition-colors flex items-center gap-1.5" onclick="resetCustomArgsToDefaults()">
+        <button type="button" id="resetCustomArgsBtn" class="px-3 py-1.5 rounded-lg bg-surface-container-high hover:bg-surface-container-highest text-on-surface-variant hover:text-on-surface text-xs font-mono border border-white/10 transition-colors flex items-center gap-1.5" onclick="resetCustomArgsToDefaults()">
           <span class="material-symbols-outlined text-[15px]">restart_alt</span>
           <span>Reset Defaults</span>
         </button>
@@ -704,20 +723,35 @@
         </section>
       </div>
 
+      <!-- Live Simulation Progress Console (Shown while running or on error) -->
+      <div id="customSimProgressPanel" class="hidden px-6 py-3 bg-surface-container-lowest border-t border-secondary/25 space-y-2 flex-shrink-0">
+        <div class="flex items-center justify-between gap-2 text-xs font-mono">
+          <div class="flex items-center gap-2 text-secondary font-bold">
+            <span id="customSimSpinner" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+            <span id="customSimPhaseLabel">Running python3 dispatch.py --level 8 --custom...</span>
+          </div>
+          <div class="flex items-center gap-2 text-[11px]">
+            <span id="customSimWorldBadge" class="hidden px-2 py-0.5 rounded bg-primary/15 text-primary border border-primary/25"></span>
+            <span id="customSimElapsed" class="text-on-surface-variant">0.0s</span>
+          </div>
+        </div>
+        <pre id="customSimLogs" class="bg-surface/90 border border-white/10 rounded-lg p-2.5 text-[11px] font-mono text-on-surface-variant max-h-28 overflow-y-auto whitespace-pre-wrap leading-relaxed"></pre>
+      </div>
+
       <!-- Modal Footer -->
       <div class="px-6 py-4 bg-surface-container-lowest/95 border-t border-white/10 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
         <div id="customArgsStatus" class="text-xs font-mono text-on-surface-variant flex items-center gap-1.5">
           <span class="material-symbols-outlined text-[16px] text-secondary">description</span>
-          <span>Target file: <code class="text-on-surface">custom_args.py</code></span>
+          <span>Saves <code class="text-on-surface">custom_args.py</code>, runs simulation &amp; loads CSV folder</span>
         </div>
 
         <div class="flex items-center gap-2.5 ml-auto">
-          <button type="button" class="h-9 px-4 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface text-xs font-mono border border-white/10 transition-colors" onclick="closeCustomArgsModal()">
+          <button type="button" id="cancelCustomArgsBtn" class="h-9 px-4 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface text-xs font-mono border border-white/10 transition-colors" onclick="closeCustomArgsModal()">
             Cancel
           </button>
-          <button type="submit" id="saveCustomArgsBtn" class="h-9 px-5 rounded-lg bg-secondary hover:bg-secondary-container text-surface font-bold text-xs font-mono shadow-[0_0_15px_rgba(78,222,163,0.35)] transition-all flex items-center gap-1.5">
-            <span class="material-symbols-outlined text-[17px]">save</span>
-            <span>Write to custom_args.py</span>
+          <button type="submit" id="saveCustomArgsBtn" class="h-9 px-5 rounded-lg bg-secondary hover:bg-secondary-container text-surface font-bold text-xs font-mono shadow-[0_0_15px_rgba(78,222,163,0.35)] transition-all flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-wait">
+            <span id="saveCustomArgsIcon" class="material-symbols-outlined text-[17px]">rocket_launch</span>
+            <span id="saveCustomArgsLabel">Save &amp; Run Simulation</span>
           </button>
         </div>
       </div>

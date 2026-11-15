@@ -1126,7 +1126,7 @@ async function scanEntry(entry, resultFiles) {
   }
 }
 
-async function processUploadedFiles(files) {
+function ingestCsvEntries(entries, sourceLabel = null) {
   const rawData = {
     places: null,
     roads: null,
@@ -1137,20 +1137,42 @@ async function processUploadedFiles(files) {
     events: null
   };
 
-  for (const file of files) {
-    const name = file.name.toLowerCase();
-    const text = await file.text();
-    if (name.includes('places.csv')) rawData.places = parseCSV(text);
-    else if (name.includes('roads.csv')) rawData.roads = parseCSV(text);
-    else if (name.includes('legs.csv')) rawData.legs = parseCSV(text);
-    else if (name.includes('gigs.csv')) rawData.gigs = parseCSV(text);
-    else if (name.includes('drivers.csv')) rawData.drivers = parseCSV(text);
-    else if (name.includes('requests.csv')) rawData.requests = parseCSV(text);
-    else if (name.includes('events.csv')) rawData.events = parseCSV(text);
+  let matchedCount = 0;
+  for (const [rawName, text] of entries) {
+    const name = String(rawName).toLowerCase();
+    if (typeof text !== 'string') continue;
+    if (name.includes('places.csv')) { rawData.places = parseCSV(text); matchedCount++; }
+    else if (name.includes('roads.csv')) { rawData.roads = parseCSV(text); matchedCount++; }
+    else if (name.includes('legs.csv')) { rawData.legs = parseCSV(text); matchedCount++; }
+    else if (name.includes('gigs.csv')) { rawData.gigs = parseCSV(text); matchedCount++; }
+    else if (name.includes('drivers.csv')) { rawData.drivers = parseCSV(text); matchedCount++; }
+    else if (name.includes('requests.csv')) { rawData.requests = parseCSV(text); matchedCount++; }
+    else if (name.includes('events.csv')) { rawData.events = parseCSV(text); matchedCount++; }
   }
 
   if (rawData.places || rawData.legs || rawData.events) {
+    if (state.isPlaying) {
+      togglePlayPause();
+    }
     indexDataset(rawData);
+    const engineBadge = document.getElementById('engineStatusIndicator');
+    if (engineBadge && sourceLabel) {
+      engineBadge.textContent = sourceLabel;
+    }
+    return matchedCount;
+  }
+  return 0;
+}
+
+async function processUploadedFiles(files) {
+  const entries = [];
+  for (const file of files) {
+    entries.push([file.name, await file.text()]);
+  }
+  const firstRel = files[0] && files[0].webkitRelativePath ? files[0].webkitRelativePath.split('/')[0] : null;
+  const label = firstRel ? `Dataset Active • ${firstRel}` : `Dataset Simulation Active • ${files.length} Files`;
+  const matched = ingestCsvEntries(entries, label);
+  if (matched > 0) {
     showNotification(`Dataset loaded successfully from ${files.length} files.`);
   } else {
     alert("Could not recognize dispatch CSV files in the uploaded set. Please include places.csv, legs.csv, events.csv, etc.");
@@ -1166,12 +1188,12 @@ function showNotification(msg) {
     notif.classList.remove('opacity-0', 'pointer-events-none');
     setTimeout(() => {
       notif.classList.add('opacity-0', 'pointer-events-none');
-    }, 4000);
+    }, 4500);
   }
 }
 
 // ==========================================
-// 9. CUSTOM CONSTANTS FORM (custom_args.py)
+// 9. CUSTOM CONSTANTS & SIMULATION RUNNER
 // ==========================================
 const DEFAULT_CUSTOM_ARGS = {
   PRICE_MULTIPLIER: { '1': 1.2, '2': 1.2, '3': 1.2, '4': 1.5, '5': 1.5, '6': 1.5, '7': 2.0, '8': 1.7 },
@@ -1200,6 +1222,7 @@ function cloneCustomArgsDefaults() {
 const customArgsState = {
   selectedScope: '8', // '1'..'8' or 'all'
   lastLevel: '8',
+  isSimulating: false,
   values: cloneCustomArgsDefaults(),
   uniformValues: {
     PRICE_MULTIPLIER: 1.70,
@@ -1332,6 +1355,7 @@ function renderCustomArgsForm() {
 }
 
 function handleCustomScopeChange(newScope) {
+  if (customArgsState.isSimulating) return;
   if (newScope === 'all' && customArgsState.selectedScope !== 'all') {
     const refLvl = customArgsState.selectedScope || '8';
     customArgsState.lastLevel = refLvl;
@@ -1346,6 +1370,7 @@ function handleCustomScopeChange(newScope) {
 }
 
 function handleCustomControlInput(key, rawVal) {
+  if (customArgsState.isSimulating) return;
   const numVal = INT_CUSTOM_KEYS.has(key) ? Math.round(parseFloat(rawVal)) : parseFloat(rawVal);
   if (!Number.isFinite(numVal)) return;
 
@@ -1373,6 +1398,7 @@ function handleCustomControlInput(key, rawVal) {
 }
 
 function resetCustomArgsToDefaults() {
+  if (customArgsState.isSimulating) return;
   customArgsState.selectedScope = '8';
   customArgsState.lastLevel = '8';
   customArgsState.values = cloneCustomArgsDefaults();
@@ -1383,7 +1409,7 @@ function resetCustomArgsToDefaults() {
     MAX_FEE_MULTIPLE: 2.20
   };
   renderCustomArgsForm();
-  setCustomArgsStatus('Defaults restored in form — click "Write to custom_args.py" to apply.', 'info');
+  setCustomArgsStatus('Defaults restored — click "Save & Run Simulation" to apply.', 'info');
 }
 
 function setCustomArgsStatus(message, tone = 'neutral') {
@@ -1407,13 +1433,75 @@ function setCustomArgsStatus(message, tone = 'neutral') {
   if (textSpan) textSpan.textContent = message;
 }
 
-async function callCustomArgsApi(method = 'GET', payload = null) {
+function setCustomFormBusy(isBusy, level = 8) {
+  customArgsState.isSimulating = isBusy;
+  const form = document.getElementById('customArgsForm');
+  if (form) {
+    form.querySelectorAll('input, select, button').forEach(el => {
+      el.disabled = isBusy;
+    });
+  }
+  const saveIcon = document.getElementById('saveCustomArgsIcon');
+  const saveLabel = document.getElementById('saveCustomArgsLabel');
+  if (saveIcon) {
+    saveIcon.textContent = isBusy ? 'progress_activity' : 'rocket_launch';
+    saveIcon.classList.toggle('animate-spin', isBusy);
+  }
+  if (saveLabel) {
+    saveLabel.textContent = isBusy ? `Running Level ${level}...` : 'Save & Run Simulation';
+  }
+}
+
+function updateSimProgressPanel({ visible, phaseText, worldId, elapsedSeconds, logs, isError = false }) {
+  const panel = document.getElementById('customSimProgressPanel');
+  if (!panel) return;
+  if (!visible) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.classList.remove('hidden');
+
+  const spinner = document.getElementById('customSimSpinner');
+  const phaseEl = document.getElementById('customSimPhaseLabel');
+  const worldBadge = document.getElementById('customSimWorldBadge');
+  const elapsedEl = document.getElementById('customSimElapsed');
+  const logsEl = document.getElementById('customSimLogs');
+
+  if (spinner) {
+    spinner.textContent = isError ? 'error' : 'progress_activity';
+    spinner.className = isError
+      ? 'material-symbols-outlined text-[16px] text-error'
+      : 'material-symbols-outlined text-[16px] animate-spin text-secondary';
+  }
+  if (phaseEl) {
+    phaseEl.textContent = phaseText || '';
+    phaseEl.className = isError ? 'text-error' : 'text-secondary';
+  }
+  if (worldBadge) {
+    if (worldId) {
+      worldBadge.textContent = worldId;
+      worldBadge.classList.remove('hidden');
+    } else {
+      worldBadge.classList.add('hidden');
+    }
+  }
+  if (elapsedEl && typeof elapsedSeconds === 'number') {
+    elapsedEl.textContent = `${elapsedSeconds.toFixed(1)}s`;
+  }
+  if (logsEl && Array.isArray(logs)) {
+    logsEl.textContent = logs.join('\n');
+    logsEl.scrollTop = logsEl.scrollHeight;
+  }
+}
+
+async function callBackendApi(routePath, method = 'GET', payload = null) {
+  const cleanRoute = routePath.replace(/^\/+/, '');
   const candidates = [];
   if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
-    candidates.push('api/custom-args');
+    candidates.push(cleanRoute);
   }
   if (window.location.origin !== 'http://127.0.0.1:8000' && window.location.origin !== 'http://localhost:8000') {
-    candidates.push('http://127.0.0.1:8000/api/custom-args');
+    candidates.push(`http://127.0.0.1:8000/${cleanRoute}`);
   }
 
   let lastError = null;
@@ -1429,16 +1517,22 @@ async function callCustomArgsApi(method = 'GET', payload = null) {
       const res = await fetch(url, options);
       const contentType = res.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
-        lastError = new Error(`Static server at ${url} does not expose /api/custom-args.`);
+        lastError = new Error(`Static server at ${url} does not expose /${cleanRoute}.`);
         continue;
       }
       const data = await res.json();
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || `Server returned HTTP ${res.status}`);
+      if (!res.ok || data.ok === false) {
+        const err = new Error(data.error || `Server returned HTTP ${res.status}`);
+        err.status = res.status;
+        err.data = data;
+        throw err;
       }
       return data;
     } catch (err) {
       lastError = err;
+      if (err && err.status && err.status !== 404) {
+        throw err;
+      }
     }
   }
   throw lastError || new Error('API server unreachable');
@@ -1474,28 +1568,37 @@ async function openCustomArgsModal() {
   const modal = document.getElementById('customArgsModal');
   if (!modal) return;
   modal.classList.remove('hidden');
+  if (customArgsState.isSimulating) return;
+
+  updateSimProgressPanel({ visible: false });
   renderCustomArgsForm();
   setCustomArgsStatus('Reading custom_args.py...', 'info');
 
   try {
-    const data = await callCustomArgsApi('GET');
+    const data = await callBackendApi('api/custom-args', 'GET');
     applyServerCustomArgs(data);
-    setCustomArgsStatus('Synced with custom_args.py', 'success');
+    setCustomArgsStatus('Synced with custom_args.py — ready to run simulation', 'success');
   } catch (_err) {
-    setCustomArgsStatus('Run "python3 website/server.py" to enable saving to custom_args.py', 'error');
+    setCustomArgsStatus('Run "python3 website/server.py" to enable custom simulations', 'error');
   }
 }
 
 function closeCustomArgsModal() {
+  if (customArgsState.isSimulating) return;
   const modal = document.getElementById('customArgsModal');
   if (modal) modal.classList.add('hidden');
 }
 
+function sleepMs(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function submitCustomArgsForm(event) {
   event.preventDefault();
-  const saveBtn = document.getElementById('saveCustomArgsBtn');
-  if (saveBtn) saveBtn.disabled = true;
+  if (customArgsState.isSimulating) return;
 
+  const levelSelect = document.getElementById('simRunLevel');
+  const runLevel = levelSelect ? parseInt(levelSelect.value, 10) || 8 : 8;
   const isUniform = customArgsState.selectedScope === 'all';
   const payloadValues = {};
 
@@ -1507,21 +1610,118 @@ async function submitCustomArgsForm(event) {
     }
   }
 
-  setCustomArgsStatus('Writing custom_args.py...', 'info');
+  setCustomFormBusy(true, runLevel);
+  updateSimProgressPanel({
+    visible: true,
+    phaseText: `Writing custom_args.py & starting dispatch.py --level ${runLevel} --custom...`,
+    worldId: null,
+    elapsedSeconds: 0,
+    logs: [`Preparing simulation (level ${runLevel})...`],
+    isError: false
+  });
+  setCustomArgsStatus('Simulation in progress — waiting for dispatch.py to finish...', 'info');
+
   try {
-    const data = await callCustomArgsApi('POST', {
+    const startResp = await callBackendApi('api/simulate', 'POST', {
+      level: runLevel,
       scope: isUniform ? 'uniform' : 'per_level',
       values: payloadValues
     });
-    applyServerCustomArgs(data);
-    setCustomArgsStatus('Saved to custom_args.py', 'success');
-    showNotification('Updated custom_args.py successfully.');
+
+    if (startResp.customArgs) {
+      applyServerCustomArgs(startResp.customArgs);
+    }
+
+    const jobId = startResp.jobId;
+    while (true) {
+      await sleepMs(800);
+      let statusResp;
+      try {
+        statusResp = await callBackendApi(`api/simulate/status?jobId=${encodeURIComponent(jobId)}`, 'GET');
+      } catch (pollErr) {
+        if (pollErr && pollErr.data && pollErr.data.status === 'error') {
+          statusResp = pollErr.data;
+        } else {
+          throw pollErr;
+        }
+      }
+
+      if (statusResp.status === 'error') {
+        const errLogs = statusResp.logs && statusResp.logs.length > 0
+          ? statusResp.logs
+          : [statusResp.error || 'Simulation failed.'];
+        updateSimProgressPanel({
+          visible: true,
+          phaseText: `Simulation failed: ${statusResp.error || 'Unknown error'}`,
+          worldId: statusResp.worldId,
+          elapsedSeconds: statusResp.elapsedSeconds || 0,
+          logs: errLogs,
+          isError: true
+        });
+        setCustomArgsStatus(statusResp.error || 'Simulation failed.', 'error');
+        return;
+      }
+
+      const phaseLabel = statusResp.phase === 'generating_csv'
+        ? `Generating CSV dataset (${statusResp.folder || 'spread-reveal-csv'})...`
+        : `Running python3 dispatch.py --level ${runLevel} --custom...`;
+
+      updateSimProgressPanel({
+        visible: true,
+        phaseText: phaseLabel,
+        worldId: statusResp.worldId,
+        elapsedSeconds: statusResp.elapsedSeconds || 0,
+        logs: statusResp.logs || [],
+        isError: false
+      });
+
+      if (statusResp.status === 'done') {
+        break;
+      }
+    }
+
+    updateSimProgressPanel({
+      visible: true,
+      phaseText: 'Loading generated CSV folder into Mission Control...',
+      worldId: null,
+      elapsedSeconds: undefined,
+      logs: undefined,
+      isError: false
+    });
+
+    const resultResp = await callBackendApi(`api/simulate/result?jobId=${encodeURIComponent(jobId)}`, 'GET');
+    const fileEntries = Object.entries(resultResp.files || {});
+    const datasetLabel = `Custom Sim • ${resultResp.folder} (Level ${resultResp.level})`;
+    const matched = ingestCsvEntries(fileEntries, datasetLabel);
+    if (matched === 0) {
+      throw new Error('Simulation finished, but no valid CSV tables were returned.');
+    }
+
+    setCustomFormBusy(false, runLevel);
+    updateSimProgressPanel({ visible: false });
+    setCustomArgsStatus(`Loaded ${resultResp.folder} successfully`, 'success');
     closeCustomArgsModal();
+
+    const summaryToast = resultResp.summaryLine
+      ? `Loaded ${resultResp.folder} • ${resultResp.summaryLine.replace(/^End\s+/, '')}`
+      : `Simulation complete! Loaded ${resultResp.folder} (Level ${resultResp.level}).`;
+    showNotification(summaryToast);
   } catch (err) {
-    setCustomArgsStatus(`Cannot write custom_args.py — start server with: python3 website/server.py`, 'error');
-    console.warn('Failed to write custom_args.py:', err);
+    const msg = (err && err.status === 404)
+      ? 'Restart "python3 website/server.py" in your terminal so /api/simulate is active.'
+      : (err && err.message ? err.message : 'Could not run simulation. Ensure python3 website/server.py is running.');
+    updateSimProgressPanel({
+      visible: true,
+      phaseText: msg,
+      worldId: null,
+      elapsedSeconds: 0,
+      logs: [msg],
+      isError: true
+    });
+    setCustomArgsStatus(msg, 'error');
+    console.warn('Simulation error:', err);
   } finally {
-    if (saveBtn) saveBtn.disabled = false;
+    setCustomFormBusy(false, runLevel);
   }
 }
 
@@ -1531,10 +1731,12 @@ async function submitCustomArgsForm(event) {
 document.addEventListener('DOMContentLoaded', () => {
   setupFileDrop();
 
-  // Close modals on Escape key
+  // Close modals on Escape key (except while simulation is running)
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-      closeCustomArgsModal();
+      if (!customArgsState.isSimulating) {
+        closeCustomArgsModal();
+      }
       const dropzone = document.getElementById('dropzoneModal');
       if (dropzone) dropzone.classList.add('hidden');
     }

@@ -11,7 +11,7 @@ accept either:
 """
 
 # Part A — Quoting & Order Selection
-PRICE_MULTIPLIER = {1: 1.2, 2: 1.2, 3: 1.2, 4: 1.5, 5: 1.5, 6: 1.5, 7: 2.0, 8: 2.0}
+PRICE_MULTIPLIER = {1: 1.2, 2: 1.2, 3: 1.2, 4: 1.5, 5: 1.5, 6: 1.5, 7: 2.0, 8: 2.35}
 SLACK_BUFFER = {1: 30, 2: 30, 3: 30, 4: 60, 5: 60, 6: 60, 7: 90, 8: 120}
 MAX_QUOTE_MULTIPLIER = 1.5
 PRICE_WAR_MULTIPLIER = 1.15
